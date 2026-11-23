@@ -1,0 +1,42 @@
+{
+  "name": "payer-correction-review",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "check": "npm run typecheck && npm test && npm run build",
+    "forge:lint": "forge lint",
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.4.0",
+    "@forge/api": "^8.5.0",
+    "@forge/bridge": "5.5.0",
+    "@forge/events": "^3.0.10",
+    "@forge/resolver": "^2.0.2",
+    "@forge/sql": "^4.0.10",
+    "@langchain/langgraph": "^1.7.5",
+    "openai": "^7.62.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "fast-check": "^4.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  },
+  "overrides": {
+    "glob": "14.0.6",
+    "minimatch": "11.0.9"
+  }
+}

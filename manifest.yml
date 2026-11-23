@@ -1,0 +1,29 @@
+modules:
+  jira:issuePanel:
+    - key: payer-correction-proof-panel
+      resource: proof-ui
+      resolver:
+        function: proof-resolver
+      title: Payer correction proof
+      icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+  function:
+    - key: proof-resolver
+      handler: forge/index.handler
+    - key: sql-migration
+      handler: forge/index.runMigration
+  scheduledTrigger:
+    - key: sql-schema-check
+      function: sql-migration
+      interval: hour
+  sql:
+    - key: main
+      engine: mysql
+resources:
+  - key: proof-ui
+    path: static/build
+permissions:
+  scopes:
+    - read:jira-work
+app:
+  runtime:
+    name: nodejs24.x
