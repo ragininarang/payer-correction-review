@@ -1,6 +1,6 @@
 # Payer Correction Review — system design
 
-**Design baseline, November 22, 2026.** One Forge installation owns one organization's case data. A Jira issue anchors the collaboration; a revisioned proof of correction is the financial source for the app. The hackathon environment operates on synthetic data. See [requirements and worked fixture](PRD.md), [autonomous workflow schema](AUTOMATION-SCHEMA.md), [tech stack](TECH-STACK.md), and [release gates](ROADMAP.md).
+**Design baseline, November 23, 2026.** One Forge installation owns one organization's case data. A Jira issue anchors collaboration; a revisioned proof in Forge SQL is the app's financial source of truth. The hackathon operates on synthetic data and uses OpenAI API for bounded reasoning. See [binding decisions](DECISIONS.md), [requirements](PRD.md), [automation schema](AUTOMATION-SCHEMA.md), [implementation plan](IMPLEMENTATION-PLAN.md), and [evaluation plan](EVALUATION-PLAN.md).
 
 ## Components and request paths
 
@@ -22,18 +22,21 @@ Runtime and limits: [Node](https://developer.atlassian.com/platform/forge/functi
 flowchart LR
   A[JSM case and evidence] --> B[Authorize and register revision]
   C[Confluence notice and procedure] --> B
-  B --> D[Scope investigator]
+  B --> C1[Evidence agent builds EvidencePack]
+  C1 --> D[Scope agent proposes cited predicate]
   D --> E[Supervisor confirms rule and inventory]
   E --> F[Deterministic reconciliation]
   F --> G[Candidate proof with line obligations]
-  G --> H[Challenger searches for counterexamples]
-  H --> I[Deterministic verifier checks findings]
+  F --> X[Exception agent investigates ambiguous chains]
+  X --> G
+  G --> H[Challenger independently searches for counterexamples]
+  H --> I[Deterministic verification checks findings]
   I -->|New verified input| F
   I -->|Unresolved challenge| J[Human reviews evidence]
   I -->|All obligations pass| K[Eligible proof in Forge SQL]
   J -->|Resolved with new evidence or rule revision| F
   K --> L[Supervisor approves exact revision]
-  L --> M[Jira projection and verification]
+  L --> M[Jira projection pending or verified]
   K --> N[Authorized Rovo and MCP reads]
   O[Late or superseding evidence] --> P[Invalidate prior proof immediately]
   P --> F
@@ -44,13 +47,13 @@ flowchart LR
 
 | Record | Minimum fields and invariant |
 |---|---|
-| Case and published revision | Jira issue ID, project, scope revision, active input fingerprint, published proof ID, review state and pending Jira projection. Publish with a conditional revision update. |
+| Case control row | Jira issue ID, project, active input revision/fingerprint, current proof ID, proof status, approval status, projection status, pending event ID and pending stage. One conditional update is the authoritative state transition. |
 | Source and inventory manifest | Type, schema version, provider/payer, source version and hash, effective period, provenance/visibility, counts, coverage declaration and supersedes reference. Expectation comes from independently supplied inventory plus approved scope. |
 | Expected line | Stable provider claim/line ID, payer, plan, service date, original reference, approved expected net amount and currency. Unique within scope revision. Multiple possible identities are an exception. |
 | Remittance event | Source batch, stable event identity, original/replacement reference, level, signed amount, effective ordering and content hash. Distinct events may legitimately share amounts. A repeated ID with different content is quarantined. |
 | Decision / exception | Case revision, line, status, observed net, expected net, reason code, evidence IDs, rule version, and prior decision. Show an unknown expectation explicitly. |
 | Proof of correction | Proof ID and revision, independent cohort and coverage assertion, frozen source IDs/hashes/versions, cutoff, rule version, proof status (candidate, challenged, eligible, approved, stale, invalid), per-line obligations and evidence chains, material counterexamples with resolution, verifier version, approval and invalidation reason. Store a content hash over canonical inputs and outcomes; it proves reproducibility of this record, not the real-world truth of the source data. |
-| Run / approval / effect | Run ID, stage, source and prompt versions, tool outcomes, retry state, reviewer decision and time, idempotency key and Jira sync receipt. Append review history with access and retention controls. |
+| Run / approval / effect | Run ID, stage, source and prompt versions, tool outcomes, retry state, reviewer decision and time, reviewed revision/hash, idempotency key and Jira sync receipt. Approval and invalidation records are append-only. |
 
 The seed adapter accepts allowlisted, schema-validated synthetic fixture variants, including an incomplete manifest. Additional fixture amounts/dates may be changed through validated controls. Record input hashes and row-level event identities: a reordered file or overlapping batch can contain previously seen events even with a different file hash.
 
@@ -65,13 +68,33 @@ The seed adapter accepts allowlisted, schema-validated synthetic fixture variant
 
 **Invalidation.** On any subscribed source mutation, mark dependent approved proofs stale before queuing recomputation. A duplicate event with the same identity/content is a no-op. A verified reversal, new in-scope line, changed coverage declaration, superseding rule or lost evidence access creates an invalidation event pointing to broken obligations and the previous approval. Conditional publication prevents an old worker from restoring eligibility. Jira shows the case reopened or pending sync; the financial proof state in SQL is authoritative until Jira projection succeeds.
 
+### Atomic input-registration and invalidation contract
+
+Forge SQL does not provide a normal multi-statement application transaction, so correctness cannot depend on several statements committing together. Use this recoverable protocol:
+
+1. Insert the immutable source event using a stable `eventId` and content hash. Duplicate identity + same hash is a no-op; duplicate identity + different hash is quarantined.
+2. Execute one conditional update against the case-control row: require the expected active revision, then atomically set the new active input revision/fingerprint, proof status `stale`, approval status `invalidated` when applicable, `pendingEventId`, and `pendingStage=register_input`.
+3. If the conditional update affects zero rows, reread and either recognize an already-applied event or retry from the new revision. Never publish based on the stale expected revision.
+4. Idempotently append invalidation history and create the stage job keyed by `installationId:caseId:inputRevision:stage`. These records may be completed after the control-row update because readers already see the proof as stale.
+5. Clear `pendingEventId/pendingStage` only with a conditional update after the ledger and job intent exist. A scheduled sweep finds non-null pending fields and completes the same idempotent work.
+
+The case-control row is the safety boundary: a crash may delay ledger completion or recomputation, but cannot leave an old approval current. Approval compares the displayed `expectedRevision` and `proofHash` with this row in one conditional update.
+
 ## Durable orchestration
 
-Use separate states for **investigation** (queued, running, waiting for evidence, waiting for scope approval, complete, failed) and **case review** (open, challenged, eligible, closed, reopened). An agent finishing its run confers no financial sign-off. A changed input marks the published proof stale immediately; readers see the last confirmed revision, invalidation reason and pending work.
+Use separate states for **investigation** (`queued`, `running`, `waiting_evidence`, `waiting_scope`, `complete`, `failed`, `cancelled`), **proof** (`candidate`, `challenged`, `eligible`, `stale`, `invalid`), **approval** (`not_requested`, `approved`, `invalidated`) and **Jira projection** (`not_requested`, `pending`, `synced`, `conflict`, `failed`). An agent finishing its run confers no financial sign-off. A changed input marks the proof stale and invalidates approval immediately. Jira failure does not erase approval; readers see `Approved — Jira sync pending` or the conflict explicitly.
 
 Each worker receives installation-scoped IDs, checks allowed project and job revision, and uses a bounded lease. Stage immutable output rows under a candidate revision. Publish only after verifying manifest completeness, using a single conditional update on the case row. Keep the intended Jira projection in that row at publication. This accommodates Forge SQL's single-query statements and lack of foreign keys. Abandoned candidate rows remain invisible and expire under a cleanup job.
 
 **LangGraph boundary.** A graph invocation may autonomously plan and use allowlisted evidence tools, but it finishes or yields within one Forge async consumer invocation. The durable outer controller records its state in SQL and queues the next stage. This is an architectural decision until a deployed spike proves LangGraph packaging, OpenAI calls, and resume behavior in Forge. A custom SQL checkpointer is optional; it must not become a prerequisite for the core reconciliation path. Forge Workflows is currently unavailable/EAP, so the build uses Async Events. [Forge Workflows status](https://developer.atlassian.com/platform/forge/runtime-reference/workflows-api/)
+
+**Shared stage envelope.** Every queued stage carries only identifiers: `schemaVersion`, `installationId`, `caseId`, `inputRevision`, `stage`, `attempt`, `authorizationEnvelopeId`, `budgetId` and `idempotencyKey`. The worker rereads the frozen inputs. Persist `sourceSnapshot`, `promptVersion`, `modelId`, typed result, citations, unresolved items, token/tool/cost totals, terminal reason and next permitted command. Terminal reasons are `completed`, `waiting_human`, `source_denied`, `source_missing`, `contradiction`, `unsupported_semantics`, `stale_revision`, `budget_exhausted`, `transient_failure` and `permanent_failure`.
+
+**Background authorization envelope.** Bind each job to installation, opted-in project, case/revision, allowed source IDs, initiating or service authority, allowed actions and expiry. Recheck installation/project/source access before every read and before publication. Access loss produces `source_denied`, blocks the relevant obligation and invalidates derived currentness. Reasoning agents never receive write capabilities.
+
+### Platform-spike completion criteria
+
+The platform boundary becomes **partial** after a deployed async consumer successfully calls OpenAI with a Zod-validated structured response and records cost/latency. It becomes **complete** only when a second invocation resumes from persisted SQL stage state; OpenAI backend egress and eligibility impact are recorded; timeout, rate-limit and model-outage paths terminate safely; one bounded LangGraph tool loop packages and runs; the encrypted key never reaches UI/logs; and the measured worst-case case budget stays below configured limits.
 
 The projection worker updates the existing issue with a target status/revision, reads back the projection, and records completion. On a timeout it checks current state before retrying. If an analyst changed the workflow meanwhile, surface a sync conflict for resolution. Prefer setting an owned field or issue property to a stable value over appending comments. Never treat a timed-out create or transition as known failure. Recover stale leases, unfinished projections and incomplete queue dispatch from a scheduled sweep. The queue has at-least-once delivery and a finite retention window. Keep rate-limit backoff, a visible failed-jobs list, and operator replay keyed to the same inputs.
 
@@ -79,17 +102,33 @@ The projection worker updates the existing issue with a target status/revision, 
 
 | Actor | Available tools | Escalation / autonomy limit |
 |---|---|---|
-| Intake agent | Read opted-in JSM/Jira incident and source manifest; classify request and detect missing inputs | Starts automatically on configured events. Cannot define the expected cohort from remittances alone. |
+| Deterministic intake | Validate qualifying transition, opted-in project, command authority, notice reference, manifest and duplicate identity | Starts no model call until minimum inputs exist. Cannot define the expected cohort from remittances alone. |
+| Evidence agent | Query case-bound, permission-visible notice/procedure versions and source catalog | Returns a typed `EvidencePack`, including contradictions, access failures, unsearched eligible sources and retrieval coverage. Read-only. |
 | Scope investigator | Read case-bound notice/procedure versions, inspect manifest, propose structured predicate with supporting spans | Propose only. Invalid citations, contradictory dates, or unsupported predicates request human review. |
 | Exception investigator | Look up original reference, inspect authorized batch manifest, follow a replacement chain, request bounded recomputation | Default maximum three evidence lookups per unresolved group before returning findings. Group equivalent exceptions to avoid one LLM call per line. New financial facts must pass the deterministic adapter. |
 | Challenger agent | Read the frozen proof, excluded inventory rows, authorized notice versions and suspicious adjustment chains; submit typed, cited counterexamples | Searches for omitted eligibility, rule conflict, ambiguous chain or reversal. Bounded lookups and time. Cannot approve, close or directly change a monetary outcome. |
-| Verification agent | Reread published revision, source IDs and Jira projection; compare actual state to intended state | May retry or open a sync exception; cannot approve financial closure. |
+| Deterministic verification | Validate citation/source identity, replay predicate and reference chains, compute money and completeness, compare revision/hash, execute policy-approved idempotent writes and read back Jira effects | No model judgment. Rejects stale, inaccessible, invalid or unsupported results. Cannot approve financial closure. |
 | Rovo case assistant | Case summary, exception list and revision difference | Cites source references and states evidence limits. May suggest a human next step. Its output cannot alter the ledger or approve closure. |
 | Consuming agent | Same four versioned read tools exposed by one Forge MCP module | Example: a provider-relations assistant checks what changed before drafting an internal briefing. Use delegated user access and explicit site opt-in. Deny any invocation without verifiable caller context. |
 
-The scope and exception investigators are application workers using model/tool loops. Forge owns the scheduler and tool permissions. Their coordination does not depend on invoking Rovo agents recursively. Treat source text as untrusted evidence. Validate tool selections, IDs, inputs and model outputs server-side. Missing, fabricated or inaccessible citations produce an unresolved finding.
+The four reasoning agents are application workers using model/tool loops. Forge owns scheduling, permissions and all persistence. Their coordination does not depend on invoking Rovo agents recursively. Treat source text as untrusted evidence. Validate tool selections, IDs, inputs and model outputs server-side. Missing, fabricated or inaccessible citations produce an unresolved finding.
 
-**Authority:** Agents may read permitted sources, propose scope, classify discrepancies, create an internal follow-up packet, and project an approved result into Jira. A supervisor alone confirms the population/expected-payment basis and approves closure of a current revision. The app may then project that approved closure into Jira and verify it. No agent contacts a payer, updates patient balances, or silently closes an unapproved financial case. This is autonomous investigation and execution within a bounded authority, not an unattended financial adjudicator.
+**Authority:** Agents may read permitted sources and propose scope, discrepancy findings, counterexamples and internal follow-up content. They cannot write directly to SQL or Jira. A supervisor alone confirms the population/expected-payment basis and approves closure of a current revision/hash. The deterministic controller may then persist validated proposals and project the approved closure into Jira through the write-policy function. No agent contacts a payer, updates patient balances, or silently closes an unapproved financial case. This is autonomous investigation within bounded authority, not an unattended financial adjudicator.
+
+### MVP command-authorization matrix
+
+| Command | Viewer | Analyst / evidence editor | Supervisor | Operator |
+|---|:---:|:---:|:---:|:---:|
+| Read visible case/proof | Yes | Yes | Yes | Only when separately granted case access |
+| Add/version synthetic evidence | No | Yes | Yes | No |
+| Confirm scope/payment basis | No | Propose only | Yes | No |
+| Record provider-relations event | No | Yes | Yes | No |
+| Approve exact revision/hash | No | No | Yes | No |
+| Replay failed idempotent job | No | No | No | Yes, without changing inputs |
+| Reset/delete synthetic case | No | No | Yes | Yes, with explicit confirmation and audit event |
+| Configure project/role mapping | No | No | No | Site-admin configuration only |
+
+Every resolver checks installation, internal-project membership, Jira visibility and app role server-side. A single environment-variable supervisor ID is allowed only as a development bootstrap and is not distribution-ready. Ordinary issue read permission never grants mutation authority.
 
 ### Agent API contract, version 1
 
