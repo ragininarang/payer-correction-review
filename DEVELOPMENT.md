@@ -6,6 +6,7 @@ This repository includes a workspace-local Node.js 24 and Forge CLI installation
 ./scripts/use-local-tools.sh npm run check
 ./scripts/use-local-tools.sh npm run dev
 ./scripts/use-local-tools.sh forge lint
+./scripts/use-local-tools.sh gh auth status
 ```
 
 The local prototype runs without Atlassian or OpenAI credentials. The deployed Forge issue panel requires an Atlassian developer login, an app registration and a Jira/JSM development site. Keep all credentials outside Git.
