@@ -1,6 +1,6 @@
 # Payer Correction Review — system design
 
-**Design baseline, November 22, 2026.** One Forge installation owns one organization's case data. A Jira issue anchors the collaboration; a versioned reconciliation result is the financial source for the app. The hackathon environment operates on synthetic data. See [requirements and worked fixture](PRD.md), [autonomous workflow schema](AUTOMATION-SCHEMA.md), and [release gates](ROADMAP.md).
+**Design baseline, November 22, 2026.** One Forge installation owns one organization's case data. A Jira issue anchors the collaboration; a revisioned proof of correction is the financial source for the app. The hackathon environment operates on synthetic data. See [requirements and worked fixture](PRD.md), [autonomous workflow schema](AUTOMATION-SCHEMA.md), [tech stack](TECH-STACK.md), and [release gates](ROADMAP.md).
 
 ## Components and request paths
 
@@ -25,24 +25,31 @@ flowchart LR
   B --> D[Scope investigator]
   D --> E[Supervisor confirms rule and inventory]
   E --> F[Deterministic reconciliation]
-  F --> G[Exception investigator and verification]
-  G -->|New verified input| F
-  G -->|Evidence exhausted| H[Review exceptions]
-  F -->|Publish result| I[Versioned case view in SQL]
-  H --> I
-  I --> J[Human approval and Jira projection]
-  I --> K[Authorized Rovo and MCP reads]
+  F --> G[Candidate proof with line obligations]
+  G --> H[Challenger searches for counterexamples]
+  H --> I[Deterministic verifier checks findings]
+  I -->|New verified input| F
+  I -->|Unresolved challenge| J[Human reviews evidence]
+  I -->|All obligations pass| K[Eligible proof in Forge SQL]
+  J -->|Resolved with new evidence or rule revision| F
+  K --> L[Supervisor approves exact revision]
+  L --> M[Jira projection and verification]
+  K --> N[Authorized Rovo and MCP reads]
+  O[Late or superseding evidence] --> P[Invalidate prior proof immediately]
+  P --> F
+  P --> M
 ```
 
 ## Inputs, storage and financial invariants
 
 | Record | Minimum fields and invariant |
 |---|---|
-| Case and published revision | Jira issue ID, project, scope revision, active input fingerprint, published result ID, review state and pending Jira projection. Publish with a conditional revision update. |
+| Case and published revision | Jira issue ID, project, scope revision, active input fingerprint, published proof ID, review state and pending Jira projection. Publish with a conditional revision update. |
 | Source and inventory manifest | Type, schema version, provider/payer, source version and hash, effective period, provenance/visibility, counts, coverage declaration and supersedes reference. Expectation comes from independently supplied inventory plus approved scope. |
 | Expected line | Stable provider claim/line ID, payer, plan, service date, original reference, approved expected net amount and currency. Unique within scope revision. Multiple possible identities are an exception. |
 | Remittance event | Source batch, stable event identity, original/replacement reference, level, signed amount, effective ordering and content hash. Distinct events may legitimately share amounts. A repeated ID with different content is quarantined. |
 | Decision / exception | Case revision, line, status, observed net, expected net, reason code, evidence IDs, rule version, and prior decision. Show an unknown expectation explicitly. |
+| Proof of correction | Proof ID and revision, independent cohort and coverage assertion, frozen source IDs/hashes/versions, cutoff, rule version, proof status (candidate, challenged, eligible, approved, stale, invalid), per-line obligations and evidence chains, material counterexamples with resolution, verifier version, approval and invalidation reason. Store a content hash over canonical inputs and outcomes; it proves reproducibility of this record, not the real-world truth of the source data. |
 | Run / approval / effect | Run ID, stage, source and prompt versions, tool outcomes, retry state, reviewer decision and time, idempotency key and Jira sync receipt. Append review history with access and retention controls. |
 
 The seed adapter accepts allowlisted, schema-validated synthetic fixture variants, including an incomplete manifest. Additional fixture amounts/dates may be changed through validated controls. Record input hashes and row-level event identities: a reordered file or overlapping batch can contain previously seen events even with a different file hash.
@@ -52,9 +59,15 @@ The seed adapter accepts allowlisted, schema-validated synthetic fixture variant
 3. Apply the adapter's documented signed-event semantics. A $100 replacement, a $100 reversal of it, and a $100 reissue net to $100. Never add a provider-level adjustment to an arbitrary line. The demo supports full reversals and replacements with explicit references; quarantine other semantics until a domain-approved adapter supports them.
 4. Classify each in-scope line once; report unknown/out-of-scope evidence separately. Distinguish missing evidence from a verified $0 payment. Verify the result covers the full expected set. A superseding scope or late reversal schedules recomputation of dependent results; a full recompute is the reference implementation for testing incremental updates.
 
+**Proof obligations.** (1) The inventory is independently sourced and its declared coverage supports the confirmed predicate. (2) The applied rule is the approved version effective for this cohort. (3) Every included line has an unambiguous identity and complete supported adjustment chain through the cutoff. (4) Its observed adjudicated net equals the expected amount. (5) No excluded line, provider-level adjustment, superseding notice or later event defeats obligations 1–4. The first four are checked mechanically where the typed input is complete. The Challenger searches for a counterexample to obligation 5 and scope/rule assumptions; it does not decide whether the proof passes. Unknown, inaccessible or unsupported evidence yields a blocked obligation, never a silent success.
+
+**Challenge protocol.** The Challenger receives a frozen candidate proof, an allowlisted source catalog and a strict lookup budget. It queries excluded inventory rows, other notice versions and suspicious adjustment chains; outputs `obligationId`, `sourceIds`, `counterexampleType`, `claim` and `requestedCheck`. The verifier checks source identity and access, replays the relevant predicate or reference chain, then records reproduced, refuted or unresolved with a reason. Do not allow the agent to create its own evidence or widen permissions. A deterministic discovered failure does not wait for a Challenger run. If the Challenger times out or cannot inspect a required source, the proof records incomplete challenge coverage and cannot become eligible until the missing check is completed or a supervisor explicitly narrows the scope and creates a new revision.
+
+**Invalidation.** On any subscribed source mutation, mark dependent approved proofs stale before queuing recomputation. A duplicate event with the same identity/content is a no-op. A verified reversal, new in-scope line, changed coverage declaration, superseding rule or lost evidence access creates an invalidation event pointing to broken obligations and the previous approval. Conditional publication prevents an old worker from restoring eligibility. Jira shows the case reopened or pending sync; the financial proof state in SQL is authoritative until Jira projection succeeds.
+
 ## Durable orchestration
 
-Use separate states for **investigation** (queued, running, waiting for evidence, waiting for scope approval, complete, failed) and **case review** (open, eligible, closed, reopened). An agent finishing its run confers no financial sign-off. A changed input marks the published result stale immediately; readers see the last confirmed revision and pending work.
+Use separate states for **investigation** (queued, running, waiting for evidence, waiting for scope approval, complete, failed) and **case review** (open, challenged, eligible, closed, reopened). An agent finishing its run confers no financial sign-off. A changed input marks the published proof stale immediately; readers see the last confirmed revision, invalidation reason and pending work.
 
 Each worker receives installation-scoped IDs, checks allowed project and job revision, and uses a bounded lease. Stage immutable output rows under a candidate revision. Publish only after verifying manifest completeness, using a single conditional update on the case row. Keep the intended Jira projection in that row at publication. This accommodates Forge SQL's single-query statements and lack of foreign keys. Abandoned candidate rows remain invisible and expire under a cleanup job.
 
@@ -69,9 +82,10 @@ The projection worker updates the existing issue with a target status/revision, 
 | Intake agent | Read opted-in JSM/Jira incident and source manifest; classify request and detect missing inputs | Starts automatically on configured events. Cannot define the expected cohort from remittances alone. |
 | Scope investigator | Read case-bound notice/procedure versions, inspect manifest, propose structured predicate with supporting spans | Propose only. Invalid citations, contradictory dates, or unsupported predicates request human review. |
 | Exception investigator | Look up original reference, inspect authorized batch manifest, follow a replacement chain, request bounded recomputation | Default maximum three evidence lookups per unresolved group before returning findings. Group equivalent exceptions to avoid one LLM call per line. New financial facts must pass the deterministic adapter. |
+| Challenger agent | Read the frozen proof, excluded inventory rows, authorized notice versions and suspicious adjustment chains; submit typed, cited counterexamples | Searches for omitted eligibility, rule conflict, ambiguous chain or reversal. Bounded lookups and time. Cannot approve, close or directly change a monetary outcome. |
 | Verification agent | Reread published revision, source IDs and Jira projection; compare actual state to intended state | May retry or open a sync exception; cannot approve financial closure. |
 | Rovo case assistant | Case summary, exception list and revision difference | Cites source references and states evidence limits. May suggest a human next step. Its output cannot alter the ledger or approve closure. |
-| Consuming agent | Same three versioned read tools exposed by one Forge MCP module | Example: a provider-relations assistant checks what changed before drafting an internal briefing. Use delegated user access and explicit site opt-in. Deny any invocation without verifiable caller context. |
+| Consuming agent | Same four versioned read tools exposed by one Forge MCP module | Example: a provider-relations assistant checks what changed before drafting an internal briefing. Use delegated user access and explicit site opt-in. Deny any invocation without verifiable caller context. |
 
 The scope and exception investigators are application workers using model/tool loops. Forge owns the scheduler and tool permissions. Their coordination does not depend on invoking Rovo agents recursively. Treat source text as untrusted evidence. Validate tool selections, IDs, inputs and model outputs server-side. Missing, fabricated or inaccessible citations produce an unresolved finding.
 
@@ -83,9 +97,10 @@ Implement a shared application API behind Forge resolvers, Rovo actions and MCP.
 
 | Read-only tool | Request | Response |
 |---|---|---|
-| `get-case-summary` | `caseId`, optional `revision` | `scopeCoverage`, counts, known exposure in integer cents, currency, adjudication basis, closure state, input freshness |
+| `get-case-summary` | `caseId`, optional `revision` | `proofId`, `proofStatus`, `scopeCoverage`, counts, known exposure in integer cents, currency, adjudication basis, closure state, input freshness, unresolved challenge count |
 | `list-case-exceptions` | `caseId, revision`, optional `status, cursor, limit` | Stable, paged exceptions with reason codes, needed evidence and visible source references; maximum 50 items |
 | `get-case-changes` | `caseId, fromRevision, toRevision` | Changed decisions, causal event references, count/amount deltas, and whether prior approval was invalidated |
+| `get-proof-obligations` | `caseId, revision`, optional `cursor, limit` | Paginated obligation status, source IDs, verified counterexamples and invalidation reasons, with access filtering |
 
 All successful tool responses include `schemaVersion, caseId, revision, asOf, runId`. Pin pagination to the requested revision. Validate opaque cursor binding to caller, case and filters. Use typed errors for invalid input, stale/unavailable revision, throttling (with retry hint), and unavailability. Unknown or inaccessible case IDs return the same external error. Redact restricted sources; if a derived conclusion would reveal their contents, withhold it as well. Provide a bounded structured envelope, serialized to JSON text where the action adapter requires it. Cache only within the same access context.
 
