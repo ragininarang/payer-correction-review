@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24 <25" },
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
@@ -13,13 +15,21 @@
     "dev": "vite"
   },
   "dependencies": {
-    "@noble/hashes": "^2.4.0",
+    "@atlaskit/breadcrumbs": "^17.8.8",
+    "@atlaskit/button": "^25.8.3",
+    "@atlaskit/css-reset": "^8.4.10",
+    "@atlaskit/lozenge": "^17.0.9",
+    "@atlaskit/modal-dialog": "^17.3.0",
+    "@atlaskit/section-message": "^10.3.0",
+    "@atlaskit/tabs": "^21.3.1",
+    "@atlaskit/tokens": "^20.14.0",
     "@forge/api": "^8.5.0",
     "@forge/bridge": "5.5.0",
     "@forge/events": "^3.0.10",
     "@forge/resolver": "^2.0.2",
     "@forge/sql": "^4.0.10",
     "@langchain/langgraph": "^1.7.5",
+    "@noble/hashes": "^2.4.0",
     "openai": "^7.62.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
