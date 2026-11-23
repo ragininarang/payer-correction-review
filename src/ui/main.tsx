@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { buildProof } from '../domain/proof.js';
-import type { CorrectionProof } from '../domain/types.js';
-import { baseInput, conflictingScopeInput, scopeCounterexample, withFinalReplacement, withLateReversal } from '../fixtures/demo.js';
+import { buildProof } from '../domain/proof';
+import type { CorrectionProof } from '../domain/types';
+import { baseInput, conflictingScopeInput, scopeCounterexample, withFinalReplacement, withLateReversal } from '../fixtures/demo';
 import './style.css';
 
 type Step = 'missing' | 'corrected' | 'reversed' | 'challenged';
@@ -25,6 +25,15 @@ async function callForge<T>(method: string): Promise<T> {
   return await invoke(method) as T;
 }
 
+function isCaseView(value: unknown): value is CaseView {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<CaseView>;
+  return typeof candidate.step === 'string'
+    && typeof candidate.proof === 'object'
+    && candidate.proof !== null
+    && typeof candidate.proof.expectedLineCount === 'number';
+}
+
 function currency(cents: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(cents / 100);
 }
@@ -40,7 +49,7 @@ function App() {
     setBusy(true);
     callForge<CaseView | null>('getCase')
       .then((result) => {
-        if (result) setView({ ...result, mode: 'forge' });
+        if (isCaseView(result)) setView({ ...result, mode: 'forge' });
         else setMessage('This issue has no synthetic review yet. Initialize it to begin.');
       })
       .catch((error: unknown) => setMessage(error instanceof Error ? error.message : 'Unable to load this case.'))
@@ -60,6 +69,7 @@ function App() {
     setBusy(true);
     try {
       const result = await callForge<CaseView>(action);
+      if (!isCaseView(result)) throw new Error('The app returned an invalid case response.');
       setView({ ...result, mode: 'forge' });
     } catch (error: unknown) {
       setMessage(error instanceof Error ? error.message : 'The action failed.');

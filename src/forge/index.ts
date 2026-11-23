@@ -2,9 +2,9 @@ import api, { route } from '@forge/api';
 import Resolver from '@forge/resolver';
 import { migrationRunner, sql } from '@forge/sql';
 import type { UpdateQueryResponse } from '@forge/sql';
-import { buildProof } from '../domain/proof.js';
-import type { CorrectionProof, ProofInput } from '../domain/types.js';
-import { baseInput, conflictingScopeInput, scopeCounterexample, withFinalReplacement, withLateReversal } from '../fixtures/demo.js';
+import { buildProof } from '../domain/proof';
+import type { CorrectionProof, ProofInput } from '../domain/types';
+import { baseInput, conflictingScopeInput, scopeCounterexample, withFinalReplacement, withLateReversal } from '../fixtures/demo';
 
 type Step = 'missing' | 'corrected' | 'reversed' | 'challenged';
 interface CaseRow {
@@ -85,6 +85,7 @@ const resolver = new Resolver();
 resolver.define('getCase', async ({ context }) => {
   const issueId = issueIdFromContext(context);
   await authorizeIssue(issueId);
+  await runMigration();
   const row = await readCase(issueId);
   return row ? view(row) : null;
 });

@@ -9,7 +9,7 @@ This repository includes a workspace-local Node.js 24 and Forge CLI installation
 ./scripts/use-local-tools.sh gh auth status
 ```
 
-The local prototype runs without Atlassian or OpenAI credentials. The deployed Forge issue panel requires an Atlassian developer login, an app registration and a Jira/JSM development site. Keep all credentials outside Git.
+The local prototype runs without Atlassian or OpenAI credentials. The registered Forge app ID is stored in `manifest.yml`. Development version 2.3.0 is deployed and installed in Jira on the free demo site `one-atlas-fnmi.atlassian.net`, which expires February 21, 2027. Keep all credentials outside Git.
 
 ## One-time Forge connection
 
@@ -20,7 +20,15 @@ The local prototype runs without Atlassian or OpenAI credentials. The deployed F
 5. Set the supervisor account ID with `forge variables set --encrypt PCR_SUPERVISOR_ACCOUNT_ID <account-id> -e development`.
 6. Open a Jira or JSM issue, add **Payer correction proof** from Apps and initialize the synthetic case.
 
-The current development slice does not call OpenAI. Add `OPENAI_API_KEY` only when the bounded Challenger agent is implemented. Forge SQL is provisioned per installation; the app applies an idempotent schema migration before initializing a case and also checks the schema hourly.
+The current development slice does not call OpenAI. The key may be held in macOS Keychain for future development, but do not add `OPENAI_API_KEY` to Forge until the bounded Challenger agent and its call limits are implemented. Forge SQL is provisioned per installation; the app applies an idempotent schema migration before initializing a case and also checks the schema hourly.
+
+## Cost controls
+
+- Hard maximum for new project cash spend: **$100**. Prefer free allowances and existing credits.
+- The current app has no OpenAI call path, remote hosting or paid database.
+- Forge reports this development deployment as eligible for **Runs on Atlassian**.
+- Do not enable a paid API without a project spend limit, per-run call/token limits and a recorded cost test.
+- Stop development usage before any provider reaches its configured limit; billing dashboards may lag.
 
 ## Current verification
 
@@ -28,5 +36,6 @@ The current development slice does not call OpenAI. Add `OPENAI_API_KEY` only wh
 - `npm run typecheck`: strict TypeScript contracts.
 - `npm run build`: production Custom UI bundle.
 - `forge lint`: Forge manifest and packaging validation; requires Forge authentication for some checks.
+- Live Jira smoke test: initialized a Forge SQL case, added final correction evidence, approved revision 2, imported a late reversal and verified that revision 3 invalidated the prior approval.
 
 Generated UI output in `static/build` and Forge working data in `.forge` are intentionally ignored. GitHub Actions rebuilds the UI from the lockfile on every push and pull request.

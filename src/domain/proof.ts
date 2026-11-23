@@ -8,7 +8,7 @@ import type {
   InventoryLine,
   Notice,
   ProofInput,
-} from './types.js';
+} from './types';
 
 const isoDate = /^\d{4}-\d{2}-\d{2}$/;
 

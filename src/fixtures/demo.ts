@@ -1,4 +1,4 @@
-import type { CounterexampleProposal, ProofInput } from '../domain/types.js';
+import type { CounterexampleProposal, ProofInput } from '../domain/types';
 
 const inventory = Array.from({ length: 13 }, (_, index) => ({
   lineId: `L${String(index + 1).padStart(2, '0')}`,

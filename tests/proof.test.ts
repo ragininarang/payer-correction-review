@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildProof } from '../src/domain/proof.js';
-import { baseInput, conflictingScopeInput, scopeCounterexample, withFinalReplacement, withLateReversal } from '../src/fixtures/demo.js';
+import { buildProof } from '../src/domain/proof';
+import { baseInput, conflictingScopeInput, scopeCounterexample, withFinalReplacement, withLateReversal } from '../src/fixtures/demo';
 
 describe('revisioned proof of correction', () => {
   it('uses independent inventory and identifies the missing correction', () => {
