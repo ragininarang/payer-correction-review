@@ -4,6 +4,7 @@ import Resolver from '@forge/resolver';
 import { migrationRunner, sql } from '@forge/sql';
 import type { UpdateQueryResponse } from '@forge/sql';
 import { buildProof } from '../domain/proof';
+import { approvedProjection, isMatchingProjection, nextProjectionStatus } from '../domain/projection';
 import type { CorrectionProof, ProofInput } from '../domain/types';
 import {
   classifyEvidence,
@@ -69,6 +70,15 @@ interface AuditRow {
   actor_id: string;
   details_json: string;
   occurred_at: string;
+}
+interface JiraEffectRow {
+  effect_id: string;
+  issue_id: string;
+  revision: number;
+  effect_type: string;
+  status: 'pending' | 'synced' | 'failed' | 'conflicted';
+  attempt: number;
+  details_json: string;
 }
 
 interface CaseView {
@@ -289,6 +299,69 @@ export async function runRecovery(): Promise<void> {
     await persistProofRevision(event.issue_id, proof);
     await sql.prepare('UPDATE correction_source_events SET status = ?, resulting_revision = ? WHERE event_key = ? AND status = ?')
       .bindParams('applied', row.revision, event.event_key, 'pending').execute();
+  }
+  await recoverJiraEffects();
+}
+
+async function readJiraProjection(issueId: string): Promise<unknown | null> {
+  const response = await api.asApp().requestJira(route`/rest/api/3/issue/${issueId}/properties/payer-correction-proof`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw Object.assign(new Error(`Jira projection read failed with ${response.status}.`), { status: response.status });
+  const body = await response.json() as { value?: unknown };
+  return body.value ?? null;
+}
+
+async function recoverJiraEffects(): Promise<void> {
+  const pending = await sql.prepare<JiraEffectRow>(`SELECT effect_id, issue_id, revision, effect_type,
+    status, attempt, details_json FROM correction_jira_effects
+    WHERE status = ? ORDER BY updated_at ASC LIMIT 25`).bindParams('pending').execute();
+  for (const effect of pending.rows) {
+    const row = await readCase(effect.issue_id);
+    const details = parseObject(effect.details_json);
+    const proofHash = typeof details.proofHash === 'string' ? details.proofHash : '';
+    if (!row || effect.effect_type !== 'project-approved-closure' || row.revision !== effect.revision
+      || row.approval_status !== 'approved' || row.approved_revision !== effect.revision
+      || row.approved_hash !== proofHash) {
+      await sql.prepare('UPDATE correction_jira_effects SET status = ?, updated_at = ? WHERE effect_id = ? AND status = ?')
+        .bindParams('conflicted', new Date().toISOString(), effect.effect_id, 'pending').execute();
+      continue;
+    }
+    const expected = approvedProjection(effect.revision, proofHash);
+    try {
+      let current = await readJiraProjection(effect.issue_id);
+      if (!isMatchingProjection(current, expected)) {
+        const response = await api.asApp().requestJira(
+          route`/rest/api/3/issue/${effect.issue_id}/properties/payer-correction-proof`,
+          { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(expected) },
+        );
+        if (!response.ok) throw Object.assign(new Error(`Jira projection write failed with ${response.status}.`), { status: response.status });
+        current = await readJiraProjection(effect.issue_id);
+      }
+      if (!isMatchingProjection(current, expected)) throw Object.assign(new Error('Jira projection read-back did not match.'), { status: 409 });
+      await sql.prepare('UPDATE correction_jira_effects SET status = ?, attempt = ?, details_json = ?, updated_at = ? WHERE effect_id = ? AND status = ?')
+        .bindParams('synced', effect.attempt + 1, JSON.stringify({ ...details, receipt: expected }), new Date().toISOString(), effect.effect_id, 'pending').execute();
+      await sql.prepare(`UPDATE correction_case_control SET projection_status = ?
+        WHERE issue_id = ? AND revision = ? AND approval_status = ? AND approved_hash = ?`).bindParams(
+        'synced', effect.issue_id, effect.revision, 'approved', proofHash,
+      ).execute();
+      await appendAudit(effect.issue_id, effect.revision, 'jira-update-synced', 'system-recovery', {
+        effectId: effect.effect_id,
+        proofHash,
+      }, `jira-effect:${effect.effect_id}:synced`);
+    } catch (error: unknown) {
+      const statusCode = typeof error === 'object' && error !== null && 'status' in error ? Number((error as { status: unknown }).status) : 0;
+      const failure = statusCode === 429 || statusCode >= 500 || statusCode === 0 ? 'transient' : 'permanent';
+      const attempt = effect.attempt + 1;
+      const status = nextProjectionStatus(attempt, failure);
+      await sql.prepare('UPDATE correction_jira_effects SET status = ?, attempt = ?, details_json = ?, updated_at = ? WHERE effect_id = ? AND status = ?')
+        .bindParams(status, attempt, JSON.stringify({ ...details, lastError: error instanceof Error ? error.message : 'Unknown Jira projection error' }), new Date().toISOString(), effect.effect_id, 'pending').execute();
+      if (status === 'failed') {
+        await sql.prepare(`UPDATE correction_case_control SET projection_status = ?
+          WHERE issue_id = ? AND revision = ? AND approval_status = ?`).bindParams(
+          'failed', effect.issue_id, effect.revision, 'approved',
+        ).execute();
+      }
+    }
   }
 }
 
