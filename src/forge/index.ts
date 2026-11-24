@@ -1,8 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import api, { route } from '@forge/api';
+import { Queue, type AsyncEvent } from '@forge/events';
 import Resolver from '@forge/resolver';
 import { migrationRunner, sql } from '@forge/sql';
 import type { UpdateQueryResponse } from '@forge/sql';
+import {
+  PLATFORM_SPIKE_MODEL,
+  PLATFORM_SPIKE_PROMPT_VERSION,
+  PlatformSpikeFindingSchema,
+  classifyPlatformSpikeFailure,
+  executePlatformSpike,
+  type PlatformSpikeGraphResult,
+} from '../agents/platformSpike';
 import { buildProof } from '../domain/proof';
 import { approvedProjection, invalidatedProjection, isMatchingProjection, nextProjectionStatus } from '../domain/projection';
 import type { CorrectionProof, ProofInput } from '../domain/types';
@@ -80,6 +89,45 @@ interface JiraEffectRow {
   attempt: number;
   details_json: string;
 }
+interface StageRunRow {
+  stage_run_id: string;
+  issue_id: string;
+  revision: number;
+  stage: string;
+  status: 'queued' | 'running' | 'model-complete' | 'completed' | 'failed' | 'superseded';
+  attempt: number;
+  terminal_reason: string | null;
+  telemetry_json: string;
+  result_json: string | null;
+  updated_at: string;
+}
+
+interface PlatformSpikeView {
+  runId: string;
+  revision: number;
+  status: StageRunRow['status'];
+  attempt: number;
+  terminalReason: string | null;
+  model: string | null;
+  promptVersion: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  estimatedCostMicrousd: number | null;
+  durationMs: number | null;
+  toolCalls: number | null;
+  graphSteps: number | null;
+  finding: PlatformSpikeGraphResult['finding'] | null;
+  updatedAt: string;
+}
+
+interface PlatformSpikeEventBody extends Record<string, unknown> {
+  stageRunId: string;
+  issueId: string;
+  revision: number;
+  phase: 'execute' | 'resume';
+}
+
+const platformSpikeQueue = new Queue<PlatformSpikeEventBody>({ key: 'platform-spike-queue' });
 
 interface CaseView {
   step: Step;
@@ -236,6 +284,7 @@ migrationRunner.enqueue('v008_line_results', createLineResults);
 migrationRunner.enqueue('v009_payer_followups', createPayerFollowups);
 migrationRunner.enqueue('v010_stage_runs', createStageRuns);
 migrationRunner.enqueue('v011_jira_effects', createJiraEffects);
+migrationRunner.enqueue('v012_stage_run_results', 'ALTER TABLE correction_stage_runs ADD COLUMN result_json MEDIUMTEXT NULL');
 
 export async function runMigration(): Promise<void> {
   await migrationRunner.run();
@@ -303,6 +352,7 @@ export async function runRecovery(): Promise<void> {
     await sql.prepare('UPDATE correction_source_events SET status = ?, resulting_revision = ? WHERE event_key = ? AND status = ?')
       .bindParams('applied', row.revision, event.event_key, 'pending').execute();
   }
+  await recoverPlatformSpikeDispatch();
   await recoverMissingJiraEffects();
   await recoverJiraEffects();
 }
@@ -471,6 +521,91 @@ function parseObject(value: string): Record<string, unknown> {
     const parsed = JSON.parse(value) as unknown;
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
   } catch { return {}; }
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function parsePlatformSpikeResult(value: string | null): PlatformSpikeGraphResult | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const finding = PlatformSpikeFindingSchema.parse(parsed.finding);
+    const usage = parseObject(JSON.stringify(parsed.usage ?? {}));
+    if (typeof parsed.model !== 'string' || typeof parsed.responseId !== 'string'
+      || !Number.isInteger(parsed.toolCalls) || !Number.isInteger(parsed.graphSteps)
+      || !Array.isArray(parsed.sourceIds) || !parsed.sourceIds.every((item) => typeof item === 'string')) return null;
+    const inputTokens = finiteNumber(usage.inputTokens);
+    const outputTokens = finiteNumber(usage.outputTokens);
+    const totalTokens = finiteNumber(usage.totalTokens);
+    if (inputTokens === null || outputTokens === null || totalTokens === null) return null;
+    const estimatedCostMicrousd = usage.estimatedCostMicrousd === null ? null : finiteNumber(usage.estimatedCostMicrousd);
+    return {
+      finding,
+      model: parsed.model,
+      responseId: parsed.responseId,
+      usage: { inputTokens, outputTokens, totalTokens, estimatedCostMicrousd },
+      toolCalls: parsed.toolCalls as number,
+      graphSteps: parsed.graphSteps as number,
+      sourceIds: parsed.sourceIds as string[],
+    };
+  } catch { return null; }
+}
+
+async function readStageRun(stageRunId: string): Promise<StageRunRow | null> {
+  const result = await sql.prepare<StageRunRow>(`SELECT stage_run_id, issue_id, revision, stage, status,
+    attempt, terminal_reason, telemetry_json, result_json, updated_at
+    FROM correction_stage_runs WHERE stage_run_id = ?`).bindParams(stageRunId).execute();
+  return result.rows[0] ?? null;
+}
+
+async function readLatestPlatformSpike(issueId: string): Promise<StageRunRow | null> {
+  const result = await sql.prepare<StageRunRow>(`SELECT stage_run_id, issue_id, revision, stage, status,
+    attempt, terminal_reason, telemetry_json, result_json, updated_at
+    FROM correction_stage_runs WHERE issue_id = ? AND stage = ? ORDER BY updated_at DESC LIMIT 1`)
+    .bindParams(issueId, 'platform-spike').execute();
+  return result.rows[0] ?? null;
+}
+
+function platformSpikeView(row: StageRunRow | null): PlatformSpikeView | null {
+  if (!row) return null;
+  const telemetry = parseObject(row.telemetry_json);
+  const usage = telemetry.usage && typeof telemetry.usage === 'object' ? telemetry.usage as Record<string, unknown> : {};
+  const result = parsePlatformSpikeResult(row.result_json);
+  return {
+    runId: row.stage_run_id,
+    revision: row.revision,
+    status: row.status,
+    attempt: row.attempt,
+    terminalReason: row.terminal_reason,
+    model: typeof telemetry.model === 'string' ? telemetry.model : null,
+    promptVersion: typeof telemetry.promptVersion === 'string' ? telemetry.promptVersion : PLATFORM_SPIKE_PROMPT_VERSION,
+    inputTokens: finiteNumber(usage.inputTokens),
+    outputTokens: finiteNumber(usage.outputTokens),
+    estimatedCostMicrousd: usage.estimatedCostMicrousd === null ? null : finiteNumber(usage.estimatedCostMicrousd),
+    durationMs: finiteNumber(telemetry.durationMs),
+    toolCalls: finiteNumber(telemetry.toolCalls),
+    graphSteps: finiteNumber(telemetry.graphSteps),
+    finding: result?.finding ?? null,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function enqueuePlatformSpike(row: Pick<StageRunRow, 'stage_run_id' | 'issue_id' | 'revision'>, phase: 'execute' | 'resume'): Promise<string> {
+  const { jobId } = await platformSpikeQueue.push({
+    body: { stageRunId: row.stage_run_id, issueId: row.issue_id, revision: row.revision, phase },
+    concurrency: { key: `platform-spike:${row.issue_id}`, limit: 1 },
+  });
+  return jobId;
+}
+
+async function recoverPlatformSpikeDispatch(): Promise<void> {
+  const result = await sql.prepare<StageRunRow>(`SELECT stage_run_id, issue_id, revision, stage, status,
+    attempt, terminal_reason, telemetry_json, result_json, updated_at FROM correction_stage_runs
+    WHERE stage = ? AND status IN (?, ?) ORDER BY updated_at ASC LIMIT 25`)
+    .bindParams('platform-spike', 'queued', 'model-complete').execute();
+  for (const row of result.rows) await enqueuePlatformSpike(row, row.status === 'model-complete' ? 'resume' : 'execute');
 }
 
 async function readEvidenceEvent(issueId: string, eventId: string): Promise<EvidenceRow | null> {
@@ -692,7 +827,153 @@ async function updateStep(
   return view(updated, role);
 }
 
+export async function runPlatformSpikeWorker(event: AsyncEvent<PlatformSpikeEventBody>): Promise<void> {
+  await runMigration();
+  const body = event.body;
+  if (!body || typeof body.stageRunId !== 'string' || typeof body.issueId !== 'string'
+    || !Number.isInteger(body.revision) || (body.phase !== 'execute' && body.phase !== 'resume')) return;
+  let row = await readStageRun(body.stageRunId);
+  if (!row || row.issue_id !== body.issueId || row.revision !== body.revision || row.stage !== 'platform-spike') return;
+  if (row.status === 'completed' || row.status === 'failed' || row.status === 'superseded') return;
+
+  const currentCase = await readCase(row.issue_id);
+  if (!currentCase || currentCase.revision !== row.revision) {
+    await sql.prepare(`UPDATE correction_stage_runs SET status = ?, terminal_reason = ?, updated_at = ?
+      WHERE stage_run_id = ? AND status NOT IN (?, ?, ?)`).bindParams(
+      'superseded', 'stale-revision', new Date().toISOString(), row.stage_run_id, 'completed', 'failed', 'superseded',
+    ).execute();
+    return;
+  }
+
+  if (body.phase === 'resume') {
+    if (row.status !== 'model-complete') return;
+    const persisted = parsePlatformSpikeResult(row.result_json);
+    if (!persisted) {
+      await sql.prepare(`UPDATE correction_stage_runs SET status = ?, terminal_reason = ?, updated_at = ?
+        WHERE stage_run_id = ? AND status = ?`).bindParams(
+        'failed', 'invalid-persisted-result', new Date().toISOString(), row.stage_run_id, 'model-complete',
+      ).execute();
+      return;
+    }
+    const completedAt = new Date().toISOString();
+    const completed = await sql.prepare<UpdateQueryResponse>(`UPDATE correction_stage_runs SET status = ?, terminal_reason = ?, updated_at = ?
+      WHERE stage_run_id = ? AND status = ? AND revision = ?`).bindParams(
+      'completed', 'completed', completedAt, row.stage_run_id, 'model-complete', row.revision,
+    ).execute();
+    if (completed.rows.affectedRows === 1) {
+      await appendAudit(row.issue_id, row.revision, 'platform-spike-completed', 'system-worker', {
+        stageRunId: row.stage_run_id,
+        model: persisted.model,
+        promptVersion: PLATFORM_SPIKE_PROMPT_VERSION,
+        toolCalls: persisted.toolCalls,
+        inputTokens: persisted.usage.inputTokens,
+        outputTokens: persisted.usage.outputTokens,
+        estimatedCostMicrousd: persisted.usage.estimatedCostMicrousd,
+      }, `platform-spike:${row.stage_run_id}:completed`);
+    }
+    return;
+  }
+
+  if (row.status === 'model-complete') {
+    await enqueuePlatformSpike(row, 'resume');
+    return;
+  }
+  if (row.attempt >= 3) {
+    await sql.prepare('UPDATE correction_stage_runs SET status = ?, terminal_reason = ?, updated_at = ? WHERE stage_run_id = ?')
+      .bindParams('failed', 'attempt-budget-exhausted', new Date().toISOString(), row.stage_run_id).execute();
+    return;
+  }
+
+  const attempt = row.attempt + 1;
+  const startedAt = Date.now();
+  const claimed = await sql.prepare<UpdateQueryResponse>(`UPDATE correction_stage_runs SET status = ?, attempt = ?, updated_at = ?
+    WHERE stage_run_id = ? AND status IN (?, ?)`).bindParams(
+    'running', attempt, new Date(startedAt).toISOString(), row.stage_run_id, 'queued', 'running',
+  ).execute();
+  if (claimed.rows.affectedRows !== 1) return;
+
+  const model = process.env.PCR_OPENAI_MODEL || PLATFORM_SPIKE_MODEL;
+  try {
+    const result = await executePlatformSpike(process.env.OPENAI_API_KEY || '', row.stage_run_id, model);
+    const telemetry = {
+      promptVersion: PLATFORM_SPIKE_PROMPT_VERSION,
+      model: result.model,
+      usage: result.usage,
+      durationMs: Date.now() - startedAt,
+      toolCalls: result.toolCalls,
+      graphSteps: result.graphSteps,
+      sourceIds: result.sourceIds,
+      responseStored: true,
+    };
+    await sql.prepare(`UPDATE correction_stage_runs SET status = ?, terminal_reason = NULL,
+      telemetry_json = ?, result_json = ?, updated_at = ? WHERE stage_run_id = ? AND status = ? AND revision = ?`).bindParams(
+      'model-complete', JSON.stringify(telemetry), JSON.stringify(result), new Date().toISOString(),
+      row.stage_run_id, 'running', row.revision,
+    ).execute();
+    row = await readStageRun(row.stage_run_id);
+    if (row?.status === 'model-complete') await enqueuePlatformSpike(row, 'resume');
+  } catch (error: unknown) {
+    const failure = classifyPlatformSpikeFailure(error);
+    const retryable = failure === 'rate-limit' || failure === 'timeout' || failure === 'provider' || failure === 'unknown';
+    const nextStatus: StageRunRow['status'] = retryable && attempt < 3 ? 'queued' : 'failed';
+    const telemetry = {
+      promptVersion: PLATFORM_SPIKE_PROMPT_VERSION,
+      model,
+      durationMs: Date.now() - startedAt,
+      failure,
+      retryable,
+    };
+    await sql.prepare(`UPDATE correction_stage_runs SET status = ?, terminal_reason = ?, telemetry_json = ?, updated_at = ?
+      WHERE stage_run_id = ? AND status = ?`).bindParams(
+      nextStatus, failure, JSON.stringify(telemetry), new Date().toISOString(), body.stageRunId, 'running',
+    ).execute();
+    if (nextStatus === 'queued') throw new Error(`Platform spike requested a safe retry after ${failure}.`);
+  }
+}
+
 const resolver = new Resolver();
+
+resolver.define('startPlatformSpike', async ({ context }) => {
+  const actor = await authorize(context as ResolverContext, 'run-platform-spike');
+  if (process.env.PCR_ENABLE_PLATFORM_SPIKE !== 'true') throw new Error('The platform spike is disabled in this environment.');
+  if (!process.env.OPENAI_API_KEY) throw new Error('The encrypted OpenAI API key is not configured in Forge.');
+  const row = await readCase(actor.issueId);
+  if (!row) throw new Error('Initialize the synthetic case before starting the platform spike.');
+  const model = process.env.PCR_OPENAI_MODEL || PLATFORM_SPIKE_MODEL;
+  const stageRunId = contentHash({
+    issueId: actor.issueId,
+    revision: row.revision,
+    stage: 'platform-spike',
+    promptVersion: PLATFORM_SPIKE_PROMPT_VERSION,
+    model,
+  });
+  const now = new Date().toISOString();
+  const initialTelemetry = JSON.stringify({
+    promptVersion: PLATFORM_SPIKE_PROMPT_VERSION,
+    model,
+    queuedBy: actor.accountId,
+    queuedAt: now,
+    limits: { calls: 1, toolCalls: 1, maxOutputTokens: 300, timeoutMs: 20_000 },
+  });
+  await sql.prepare(`INSERT IGNORE INTO correction_stage_runs
+    (stage_run_id, issue_id, revision, stage, status, attempt, terminal_reason, telemetry_json, result_json, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)`).bindParams(
+    stageRunId, actor.issueId, row.revision, 'platform-spike', 'queued', 0, initialTelemetry, now,
+  ).execute();
+  let stageRun = await readStageRun(stageRunId);
+  if (!stageRun) throw new Error('The platform spike could not be registered.');
+  if (stageRun.status === 'failed') {
+    await sql.prepare(`UPDATE correction_stage_runs SET status = ?, attempt = 0, terminal_reason = NULL,
+      telemetry_json = ?, result_json = NULL, updated_at = ? WHERE stage_run_id = ? AND status = ?`).bindParams(
+      'queued', initialTelemetry, now, stageRunId, 'failed',
+    ).execute();
+    stageRun = await readStageRun(stageRunId);
+    if (!stageRun) throw new Error('The platform spike retry could not be registered.');
+  }
+  if (stageRun.status === 'queued') await enqueuePlatformSpike(stageRun, 'execute');
+  else if (stageRun.status === 'model-complete') await enqueuePlatformSpike(stageRun, 'resume');
+  return platformSpikeView(stageRun);
+});
 
 resolver.define('getCase', async ({ context }) => {
   const actor = await authorize(context as ResolverContext, 'read');
@@ -702,7 +983,12 @@ resolver.define('getCase', async ({ context }) => {
     actorRole: actor.role,
     followUps: await readFollowUps(actor.issueId),
     history: await readHistory(actor.issueId),
-    development: { recoveryTestEnabled: process.env.PCR_ENABLE_RECOVERY_TEST === 'true' },
+    platformSpike: platformSpikeView(await readLatestPlatformSpike(actor.issueId)),
+    development: {
+      recoveryTestEnabled: process.env.PCR_ENABLE_RECOVERY_TEST === 'true',
+      platformSpikeEnabled: process.env.PCR_ENABLE_PLATFORM_SPIKE === 'true',
+      openAiConfigured: Boolean(process.env.OPENAI_API_KEY),
+    },
   };
 });
 

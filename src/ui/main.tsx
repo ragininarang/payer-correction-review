@@ -46,12 +46,38 @@ interface HistoryEvent {
   details: Record<string, unknown>;
   occurredAt: string;
 }
+interface PlatformSpikeView {
+  runId: string;
+  revision: number;
+  status: 'queued' | 'running' | 'model-complete' | 'completed' | 'failed' | 'superseded';
+  attempt: number;
+  terminalReason: string | null;
+  model: string | null;
+  promptVersion: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  estimatedCostMicrousd: number | null;
+  durationMs: number | null;
+  toolCalls: number | null;
+  graphSteps: number | null;
+  finding: {
+    payer: string;
+    claimType: string;
+    serviceDateStart: string;
+    serviceDateEnd: string;
+    inventoryRequired: boolean;
+    needsHumanReview: boolean;
+    summary: string;
+  } | null;
+  updatedAt: string;
+}
 interface WorkspaceResponse {
   case: CaseView | null;
   actorRole: AppRole;
   followUps?: FollowUp[];
   history?: HistoryEvent[];
-  development?: { recoveryTestEnabled?: boolean };
+  platformSpike?: PlatformSpikeView | null;
+  development?: { recoveryTestEnabled?: boolean; platformSpikeEnabled?: boolean; openAiConfigured?: boolean };
 }
 
 function proofFor(step: Step): CorrectionProof {
@@ -173,6 +199,9 @@ function App() {
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
   const [history, setHistory] = useState<HistoryEvent[]>([]);
   const [recoveryTestEnabled, setRecoveryTestEnabled] = useState(false);
+  const [platformSpikeEnabled, setPlatformSpikeEnabled] = useState(false);
+  const [openAiConfigured, setOpenAiConfigured] = useState(false);
+  const [platformSpike, setPlatformSpike] = useState<PlatformSpikeView | null>(null);
 
   useEffect(() => {
     if (!forgeMode) return;
@@ -180,10 +209,24 @@ function App() {
     callForge<WorkspaceResponse>('getCase').then((result) => {
       if (!isWorkspaceResponse(result)) throw new Error('The app returned an invalid workspace response.');
       setRecoveryTestEnabled(result.development?.recoveryTestEnabled === true);
+      setPlatformSpikeEnabled(result.development?.platformSpikeEnabled === true);
+      setOpenAiConfigured(result.development?.openAiConfigured === true);
+      setPlatformSpike(result.platformSpike ?? null);
       if (result.case) { setView({ ...result.case, mode: 'forge' }); setHasCase(true); setFollowUps(result.followUps ?? []); setHistory(result.history ?? []); }
       else { setView((current) => ({ ...current, actorRole: result.actorRole, mode: 'forge' })); setHasCase(false); }
     }).catch((error: unknown) => showMessage(error instanceof Error ? error.message : 'Unable to load this correction review.', 'danger')).finally(() => setBusy(false));
   }, [forgeMode]);
+
+  useEffect(() => {
+    if (!forgeMode || !platformSpike || !['queued', 'running', 'model-complete'].includes(platformSpike.status)) return;
+    const timer = window.setInterval(() => {
+      void callForge<WorkspaceResponse>('getCase').then((workspace) => {
+        setPlatformSpike(workspace.platformSpike ?? null);
+        setHistory(workspace.history ?? []);
+      }).catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [forgeMode, platformSpike?.status, platformSpike?.runId]);
 
   function showMessage(text: string, tone: 'success' | 'danger' | 'information' = 'information') { setMessage(text); setMessageTone(tone); }
   async function act(action: Action) {
@@ -285,6 +328,20 @@ function App() {
     } finally { setBusy(false); }
   }
 
+  async function startPlatformSpike() {
+    if (!forgeMode) return;
+    setBusy(true); setMessage('');
+    try {
+      const result = await callForge<PlatformSpikeView>('startPlatformSpike');
+      setPlatformSpike(result);
+      showMessage(result.status === 'completed'
+        ? 'The existing platform test is already complete for this evidence version.'
+        : 'The bounded platform test is queued. This does not change the financial result.', 'information');
+    } catch (error: unknown) {
+      showMessage(error instanceof Error ? error.message : 'The platform test could not be started.', 'danger');
+    } finally { setBusy(false); }
+  }
+
   const latestFollowUp = followUps[0] ?? null;
 
   if (!hasCase) return <main className="empty-shell"><div className="product-mark">PCR</div><h1>No correction review yet</h1><p>Start a review for this Jira work item using synthetic claims and payment activity. No payer will be contacted.</p><Button appearance="primary" isDisabled={busy || !can(view.actorRole, 'initialize')} onClick={() => void act('initialize')}>Start correction review</Button></main>;
@@ -308,7 +365,7 @@ function App() {
 
       <TabPanel><div className="tab-content follow-up-page"><div className="section-heading"><div><h2>Payer follow-up</h2><p>Record contact about unresolved items. A note never changes the financial result.</p></div></div>{!selectedLineIds.size ? <div className="empty-state"><h3>No claims selected</h3><p>Select unresolved service lines from Claims before preparing payer follow-up.</p>{latestFollowUp && <p>Most recent: {followUpLabel(latestFollowUp.outcome)} · Next review {latestFollowUp.nextReviewDate}</p>}<Button appearance="primary" onClick={() => { setFilter('attention'); setSelectedTab(1); }}>Choose claims</Button></div> : <div className="follow-up-grid"><section className="selected-claims"><h3>Selected for follow-up</h3>{view.proof.obligations.filter((item) => selectedLineIds.has(item.lineId)).map((item) => <article key={item.lineId}><div><strong>{lineName(item)}</strong><span>{dateLabel(item.serviceDate)} · Procedure {item.procedureCode}</span></div><span>{currency(Math.max(0, item.expectedNetCents - (item.observedNetCents ?? 0)))} unresolved</span></article>)}</section><form className="follow-up-form" onSubmit={(event) => void saveFollowUp(event)}><h3>Record payer contact</h3><label>Outcome<select name="outcome" defaultValue={latestFollowUp?.outcome ?? ''}><option value="" disabled>Choose an outcome</option><option value="payer-researching">Payer researching</option><option value="additional-information-requested">Additional information requested</option><option value="correction-promised">Correction promised</option><option value="payer-disputes-correction">Payer disputes correction</option><option value="no-response">No response</option><option value="closed-without-pursuit">Stop pursuing internally</option></select></label><label>Next review date<input name="nextReviewDate" type="date" defaultValue={latestFollowUp?.nextReviewDate ?? '2026-11-30'} /></label><label>Internal note<textarea name="note" rows={4} defaultValue={latestFollowUp?.note ?? ''} placeholder="What should the next person know?" /></label><SectionMessage appearance="information"><p>Saving this contact does not mark claims as paid. “Stop pursuing” also leaves the amount financially unresolved.</p></SectionMessage><Button appearance="primary" type="submit" isDisabled={busy}>Save payer follow-up</Button></form></div>}</div></TabPanel>
 
-      <TabPanel><div className="tab-content activity-page"><div className="section-heading"><div><h2>Review history</h2><p>Who or what changed the review, in order</p></div></div><ActivityTimeline view={view} followUp={latestFollowUp} history={history} /><section className="technical-disclosure"><button className="disclosure-button" onClick={() => setTechnicalOpen(!technicalOpen)} aria-expanded={technicalOpen}><span>Technical and automation details</span><span>{technicalOpen ? 'Hide' : 'Show'}</span></button>{technicalOpen && <div className="technical-body"><dl><div><dt>Internal case</dt><dd>{view.proof.caseId}</dd></div><div><dt>Evidence version</dt><dd>{view.proof.revision}</dd></div><div><dt>Technical identifier</dt><dd className="hash">{view.proof.inputHash}</dd></div><div><dt>Automated run</dt><dd>No failures</dd></div></dl><p className="subtle-copy">Operators use this area to diagnose failed automated runs. It cannot change the financial result.</p>{recoveryTestEnabled && <Button isDisabled={busy || view.step !== 'missing' || !can(view.actorRole, 'test-recovery')} onClick={() => void testInterruptedRecovery()}>Test interrupted recovery</Button>}</div>}</section><div className="demo-controls"><button className="demo-toggle" onClick={() => setDemoOpen(!demoOpen)}><span>Demo scenario controls</span><small>{demoOpen ? 'Hide' : 'Show'} synthetic state changes</small></button>{demoOpen && <div className="demo-actions"><Button onClick={() => void act('addCorrection')}>Import final correction</Button><Button onClick={() => void act('addReversal')}>Import late reversal</Button><Button onClick={() => void act('challenge')}>Find inclusion conflict</Button><Button appearance="danger" onClick={() => setResetOpen(true)}>Reset synthetic case</Button></div>}</div></div></TabPanel>
+      <TabPanel><div className="tab-content activity-page"><div className="section-heading"><div><h2>Review history</h2><p>Who or what changed the review, in order</p></div></div><ActivityTimeline view={view} followUp={latestFollowUp} history={history} /><section className="technical-disclosure"><button className="disclosure-button" onClick={() => setTechnicalOpen(!technicalOpen)} aria-expanded={technicalOpen}><span>Technical and automation details</span><span>{technicalOpen ? 'Hide' : 'Show'}</span></button>{technicalOpen && <div className="technical-body"><dl><div><dt>Internal case</dt><dd>{view.proof.caseId}</dd></div><div><dt>Evidence version</dt><dd>{view.proof.revision}</dd></div><div><dt>Technical identifier</dt><dd className="hash">{view.proof.inputHash}</dd></div><div><dt>Automated run</dt><dd>{platformSpike ? sentence(platformSpike.status) : 'Not started'}</dd></div>{platformSpike?.model && <div><dt>Model</dt><dd>{platformSpike.model}</dd></div>}{platformSpike?.durationMs !== null && platformSpike?.durationMs !== undefined && <div><dt>Run time</dt><dd>{(platformSpike.durationMs / 1000).toFixed(2)} seconds</dd></div>}{platformSpike?.estimatedCostMicrousd !== null && platformSpike?.estimatedCostMicrousd !== undefined && <div><dt>Estimated model cost</dt><dd>${(platformSpike.estimatedCostMicrousd / 1_000_000).toFixed(6)}</dd></div>}</dl>{platformSpike?.finding && <SectionMessage appearance="success" title="Bounded extraction completed"><p>{platformSpike.finding.summary}</p><p>One allowlisted source read · {platformSpike.inputTokens ?? 0} input tokens · {platformSpike.outputTokens ?? 0} output tokens</p></SectionMessage>}<p className="subtle-copy">Operators use this area to diagnose bounded automated runs. These tests cannot approve closure or change the financial result.</p><div className="technical-actions">{recoveryTestEnabled && <Button isDisabled={busy || view.step !== 'missing' || !can(view.actorRole, 'test-recovery')} onClick={() => void testInterruptedRecovery()}>Test interrupted recovery</Button>}{platformSpikeEnabled && <Button isDisabled={busy || !openAiConfigured || !can(view.actorRole, 'run-platform-spike')} onClick={() => void startPlatformSpike()}>{platformSpike && ['queued', 'running', 'model-complete'].includes(platformSpike.status) ? 'Platform test running' : 'Run bounded platform test'}</Button>}</div>{platformSpikeEnabled && !openAiConfigured && <p className="subtle-copy">An encrypted OpenAI key must be configured before this test can run.</p>}</div>}</section><div className="demo-controls"><button className="demo-toggle" onClick={() => setDemoOpen(!demoOpen)}><span>Demo scenario controls</span><small>{demoOpen ? 'Hide' : 'Show'} synthetic state changes</small></button>{demoOpen && <div className="demo-actions"><Button onClick={() => void act('addCorrection')}>Import final correction</Button><Button onClick={() => void act('addReversal')}>Import late reversal</Button><Button onClick={() => void act('challenge')}>Find inclusion conflict</Button><Button appearance="danger" onClick={() => setResetOpen(true)}>Reset synthetic case</Button></div>}</div></div></TabPanel>
     </Tabs>
 
     <ModalTransition>{evidenceOpen && <Modal onClose={() => setEvidenceOpen(false)}><ModalHeader><ModalTitle>Add payment evidence</ModalTitle></ModalHeader><ModalBody><p>The app checks access, identity, format, duplicates, and conflicts before updating the result.</p><div className="source-choice selected"><div><strong>Replacement payment activity</strong><span>Synthetic remittance file · 12 adjustments</span></div><Lozenge appearance="success">Ready</Lozenge></div><SectionMessage appearance="information" title="Required documents must be valid first"><p>This creates a new evidence version. If the result changes, any current closure approval is invalidated.</p></SectionMessage></ModalBody><ModalFooter><Button appearance="subtle" onClick={() => setEvidenceOpen(false)}>Cancel</Button><Button appearance="primary" isDisabled={busy || view.step !== 'missing'} onClick={() => void act('addCorrection')}>{view.step === 'missing' ? 'Add and check evidence' : 'Evidence already added'}</Button></ModalFooter></Modal>}</ModalTransition>

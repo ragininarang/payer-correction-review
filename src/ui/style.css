@@ -107,6 +107,7 @@ tbody tr:hover { background: var(--ds-background-neutral-subtle-hovered, #091e42
 .technical-disclosure { margin-top: var(--ds-space-400, 32px); border: 1px solid var(--ds-border, #091e4224); border-radius: var(--ds-radius-medium, 6px); }
 .disclosure-button { display: flex; justify-content: space-between; width: 100%; padding: var(--ds-space-150, 12px); border: 0; background: transparent; color: var(--ds-text, #172b4d); font-weight: 600; cursor: pointer; }
 .technical-body { padding: 0 var(--ds-space-200, 16px) var(--ds-space-200, 16px); }
+.technical-actions { display: flex; flex-wrap: wrap; gap: var(--ds-space-100, 8px); margin-top: var(--ds-space-150, 12px); }
 .source-choice { display: flex; justify-content: space-between; align-items: center; gap: var(--ds-space-200, 16px); margin: var(--ds-space-200, 16px) 0; padding: var(--ds-space-200, 16px); border: 2px solid var(--ds-border-selected, #0c66e4); border-radius: var(--ds-radius-medium, 6px); background: var(--ds-background-selected, #e9f2ff); }
 .source-choice strong, .source-choice span { display: block; }
 .source-choice span { margin-top: 2px; color: var(--ds-text-subtle, #44546f); font-size: 12px; }

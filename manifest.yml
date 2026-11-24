@@ -11,6 +11,13 @@ modules:
       handler: forge/index.handler
     - key: sql-migration
       handler: forge/index.runRecovery
+    - key: platform-spike-worker
+      handler: forge/index.runPlatformSpikeWorker
+      timeoutSeconds: 120
+  consumer:
+    - key: platform-spike-consumer
+      queue: platform-spike-queue
+      function: platform-spike-worker
   scheduledTrigger:
     - key: sql-schema-check
       function: sql-migration
@@ -25,6 +32,11 @@ permissions:
   scopes:
     - read:jira-work
     - write:jira-work
+  external:
+    fetch:
+      backend:
+        - address: https://api.openai.com
+          inScopeEUD: false
 app:
   runtime:
     name: nodejs24.x

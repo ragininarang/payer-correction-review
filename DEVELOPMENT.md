@@ -9,7 +9,7 @@ This repository includes a workspace-local Node.js 24 and Forge CLI installation
 ./scripts/use-local-tools.sh gh auth status
 ```
 
-The local prototype runs without Atlassian or OpenAI credentials. The registered Forge app ID is stored in `manifest.yml`. Development version 3.3.0 is deployed on the free demo site `one-atlas-fnmi.atlassian.net`, which expires February 21, 2027. Version 2.5.0 was used for the controlled source-event recovery test. Versions 3.0.0–3.1.0 added and live-tested the deterministic Jira projection worker with the installation-approved `write:jira-work` scope; version 3.3.0 restores the normal hourly schedule and makes projection bookkeeping recoverable across interrupted invocations. Keep all credentials outside Git.
+The local prototype runs without Atlassian or OpenAI credentials. The registered Forge app ID is stored in `manifest.yml`. Development version 4.1.0 is deployed and installed on the free demo site `one-atlas-fnmi.atlassian.net`, which expires February 21, 2027. Version 2.5.0 was used for the controlled source-event recovery test; versions 3.0.0–3.3.0 completed Gate 2. Version 4.1.0 adds the opt-in Phase 3 async platform spike and declared OpenAI egress. Keep all credentials outside Git.
 
 ## One-time Forge connection
 
@@ -20,19 +20,19 @@ The local prototype runs without Atlassian or OpenAI credentials. The registered
 5. Set the supervisor account ID with `forge variables set --encrypt PCR_SUPERVISOR_ACCOUNT_ID <account-id> -e development`.
 6. Open a Jira or JSM issue, add **Payer correction proof** from Apps and initialize the synthetic case.
 
-The current development slice does not call OpenAI. The key may be held in macOS Keychain for future development, but do not add `OPENAI_API_KEY` to Forge until the bounded Challenger agent and its call limits are implemented. Forge SQL is provisioned per installation; the app applies an idempotent schema migration before initializing a case and also checks the schema hourly.
+The Phase 3 path can call OpenAI only when `PCR_ENABLE_PLATFORM_SPIKE=true`, `OPENAI_API_KEY` is an encrypted Forge variable, and a supervisor/operator explicitly starts the bounded test. Ordinary Jira activity never calls the model. The worker permits one allowlisted source read, one model call, 300 maximum output tokens, a 20-second SDK timeout and three delivery attempts. Forge SQL is provisioned per installation; the app applies idempotent schema migrations and checks recoverable work hourly.
 
 ## Cost controls
 
 - Hard maximum for new project cash spend: **$100**. Prefer free allowances and existing credits.
-- The current app has no OpenAI call path, remote hosting or paid database.
-- Forge reports this development deployment as eligible for **Runs on Atlassian**.
+- The app has no remote hosting or paid database. The OpenAI path remains inactive until its encrypted Forge key is configured and the explicit test action is used.
+- Forge version 4.1.0 is **not** eligible for Runs on Atlassian because it declares and uses OpenAI egress. The spike transmits only generated synthetic notice text and declares `inScopeEUD: false`; do not describe the build as Runs on Atlassian eligible.
 - Do not enable a paid API without a project spend limit, per-run call/token limits and a recorded cost test.
 - Stop development usage before any provider reaches its configured limit; billing dashboards may lag.
 
 ## Current verification
 
-- `npm test`: 24 deterministic proof, authorization, evidence-ledger, recovery-contract and Jira-projection policy tests.
+- `npm test`: 27 deterministic proof, authorization, evidence-ledger, recovery-contract, Jira-projection and platform-spike contract tests.
 - `npm run typecheck`: strict TypeScript contracts.
 - `npm run build`: production Custom UI bundle.
 - `forge lint`: Forge manifest and packaging validation; requires Forge authentication for some checks.
@@ -40,5 +40,6 @@ The current development slice does not call OpenAI. The key may be held in macOS
 - Recovery update: a controlled version 2.5.0 test registered a pending correction in one invocation and recovered it in a second invocation. The case advanced once from evidence version 1 to 2 and produced one audit event. See [the verification record](docs/verification/phase2-pending-evidence-recovery.md).
 - Scheduled Jira-projection recovery: a live five-minute test schedule projected approved evidence version 2, remained idempotent on the following cycle, then projected the invalidated version 3 after a late reversal. The normal hourly schedule was restored afterward. See [the verification record](docs/verification/phase2-jira-projection-recovery.md).
 - Jira projection worker: writes the current approved or invalidated revision/hash to the app-owned `payer-correction-proof` issue property, reads it back, and marks the effect synced only on an exact match. Stale effects conflict; transient failures retry at most three times.
+- Phase 3 partial deployment: the async consumer, SQL stage state, LangGraph package and operator UI are live in version 4.1.0. The encrypted OpenAI key and deployed call/resume/failure evidence remain outstanding. See [the partial verification record](docs/verification/phase3-platform-spike.md).
 
 Generated UI output in `static/build` and Forge working data in `.forge` are intentionally ignored. GitHub Actions rebuilds the UI from the lockfile on every push and pull request.
