@@ -1,6 +1,6 @@
 # Payer Correction Review — build implementation plan
 
-**Status:** implementation in progress. Gates 1 and 2 are complete. Phase 3 is partially implemented: Forge version 4.1.0 packages a bounded LangGraph loop, durable Async Events consumer, SQL-persisted stage state, structured OpenAI response validation, finite retry policy, idempotency key, token/cost telemetry, second-invocation resume, and a read-only operator status view. Local tests and deployment pass; the live OpenAI call is not yet run because `OPENAI_API_KEY` is absent from Forge. See the [Phase 3 partial record](docs/verification/phase3-platform-spike.md). Gate 3 remains open until egress, resume, outage behavior, secret handling, cost and latency are observed in the deployed app. Follow [binding decisions](DECISIONS.md), [requirements](PRD.md), [system design](SYSTEM-DESIGN.md), and [evaluation plan](EVALUATION-PLAN.md). Work does not advance past a gate until its evidence is recorded.
+**Status:** implementation in progress. Gates 1–3 are complete. Forge version 4.2.0 successfully ran one bounded LangGraph/OpenAI workflow, persisted its structured result, resumed in a second Async Events invocation, and exposed cost/latency/status without allowing model output to mutate proof or approval. The observed call cost approximately $0.000173 and completed in 5.98 seconds. Timeout, 429 and provider-outage behavior has a deterministic three-attempt ceiling; configuration and invalid-output failures stop immediately. See the [Phase 3 verification record](docs/verification/phase3-platform-spike.md). The next work is Phase 4’s qualifying trigger and source-manifest foundation. Follow [binding decisions](DECISIONS.md), [requirements](PRD.md), [system design](SYSTEM-DESIGN.md), and [evaluation plan](EVALUATION-PLAN.md). Work does not advance past a gate until its evidence is recorded.
 
 ## MVP definition
 
@@ -77,7 +77,7 @@ The MVP proves one end-to-end synthetic journey: a payer reports a correction fi
 - Stale revision while the model is running.
 - Project/case/source authorization revoked before publication.
 
-**Gate 3:** deployed evidence confirms egress, packaging, safe resume, cost and outage behavior. If LangGraph is unreliable, use the same stage contracts with a small custom in-worker loop; do not change durable orchestration.
+**Gate 3 — passed November 24, 2026:** deployed evidence confirms OpenAI egress, LangGraph packaging, SQL-persisted second-invocation resume, bounded cost/latency, missing-secret fail-closed behavior and finite outage handling. LangGraph remained within its declared step and tool budgets.
 
 ## Phase 4 — deterministic qualifying trigger and source manifests
 

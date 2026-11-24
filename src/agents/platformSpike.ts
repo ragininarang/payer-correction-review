@@ -50,6 +50,16 @@ export interface PlatformSpikeGraphResult extends PlatformSpikeModelResult {
 }
 
 export type PlatformSpikeFailure = 'configuration' | 'rate-limit' | 'timeout' | 'provider' | 'invalid-output' | 'unknown';
+export type PlatformSpikeFailureStatus = 'queued' | 'failed';
+
+export function nextPlatformSpikeFailureStatus(
+  failure: PlatformSpikeFailure,
+  attempt: number,
+): PlatformSpikeFailureStatus {
+  if (!Number.isInteger(attempt) || attempt < 1) throw new Error('Attempt must be a positive integer.');
+  const retryable = failure === 'rate-limit' || failure === 'timeout' || failure === 'provider' || failure === 'unknown';
+  return retryable && attempt < 3 ? 'queued' : 'failed';
+}
 
 export function estimateCostMicrousd(model: string, inputTokens: number, outputTokens: number): number | null {
   if (model !== PLATFORM_SPIKE_MODEL) return null;

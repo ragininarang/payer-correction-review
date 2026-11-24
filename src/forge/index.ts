@@ -10,6 +10,7 @@ import {
   PlatformSpikeFindingSchema,
   classifyPlatformSpikeFailure,
   executePlatformSpike,
+  nextPlatformSpikeFailureStatus,
   type PlatformSpikeGraphResult,
 } from '../agents/platformSpike';
 import { buildProof } from '../domain/proof';
@@ -915,7 +916,7 @@ export async function runPlatformSpikeWorker(event: AsyncEvent<PlatformSpikeEven
   } catch (error: unknown) {
     const failure = classifyPlatformSpikeFailure(error);
     const retryable = failure === 'rate-limit' || failure === 'timeout' || failure === 'provider' || failure === 'unknown';
-    const nextStatus: StageRunRow['status'] = retryable && attempt < 3 ? 'queued' : 'failed';
+    const nextStatus: StageRunRow['status'] = nextPlatformSpikeFailureStatus(failure, attempt);
     const telemetry = {
       promptVersion: PLATFORM_SPIKE_PROMPT_VERSION,
       model,
