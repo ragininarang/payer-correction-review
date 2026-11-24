@@ -34,4 +34,4 @@ Verify the failure boundary where a source event is registered but the invocatio
 - Recovery of a pending Jira projection/effect.
 - OpenAI, LangGraph or agent-stage recovery, which belongs to Phase 3.
 
-Gate 2 remains open until the first two unverified Phase 2 paths are exercised and recorded.
+At the time of this test, Gate 2 remained open for scheduled delivery and pending Jira-effect recovery. Those paths were subsequently verified in the [scheduled Jira projection record](phase2-jira-projection-recovery.md), completing Gate 2.

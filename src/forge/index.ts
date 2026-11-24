@@ -4,7 +4,7 @@ import Resolver from '@forge/resolver';
 import { migrationRunner, sql } from '@forge/sql';
 import type { UpdateQueryResponse } from '@forge/sql';
 import { buildProof } from '../domain/proof';
-import { approvedProjection, isMatchingProjection, nextProjectionStatus } from '../domain/projection';
+import { approvedProjection, invalidatedProjection, isMatchingProjection, nextProjectionStatus } from '../domain/projection';
 import type { CorrectionProof, ProofInput } from '../domain/types';
 import {
   classifyEvidence,
@@ -276,6 +276,9 @@ export async function runRecovery(): Promise<void> {
         proof.inputHash, JSON.stringify(proof), event.issue_id, row.revision,
       ).execute();
       if (result.rows.affectedRows !== 1) continue;
+      if (wasApproved && row.approved_revision !== null) {
+        await queueReopenEffect(event.issue_id, nextRevision, proof.inputHash, row.approved_revision);
+      }
       row = await readCase(event.issue_id);
       if (!row) continue;
     }
@@ -300,6 +303,7 @@ export async function runRecovery(): Promise<void> {
     await sql.prepare('UPDATE correction_source_events SET status = ?, resulting_revision = ? WHERE event_key = ? AND status = ?')
       .bindParams('applied', row.revision, event.event_key, 'pending').execute();
   }
+  await recoverMissingJiraEffects();
   await recoverJiraEffects();
 }
 
@@ -311,6 +315,25 @@ async function readJiraProjection(issueId: string): Promise<unknown | null> {
   return body.value ?? null;
 }
 
+async function recoverMissingJiraEffects(): Promise<void> {
+  const result = await sql.prepare<CaseRow>(`SELECT issue_id, revision, step, proof_status, approval_status,
+    approved_revision, approved_hash, projection_status, proof_hash, proof_json
+    FROM correction_case_control WHERE projection_status = ? AND approval_status IN (?, ?) LIMIT 50`)
+    .bindParams('pending', 'approved', 'invalidated').execute();
+  for (const row of result.rows) {
+    if (row.approval_status === 'approved' && row.approved_revision === row.revision && row.approved_hash) {
+      await sql.prepare(`INSERT IGNORE INTO correction_jira_effects
+        (effect_id, issue_id, revision, effect_type, status, attempt, details_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bindParams(
+        `${row.issue_id}:${row.revision}:approved`, row.issue_id, row.revision, 'project-approved-closure',
+        'pending', 0, JSON.stringify({ proofHash: row.approved_hash }), new Date().toISOString(),
+      ).execute();
+    } else if (row.approval_status === 'invalidated' && row.approved_revision !== null) {
+      await queueReopenEffect(row.issue_id, row.revision, row.proof_hash, row.approved_revision);
+    }
+  }
+}
+
 async function recoverJiraEffects(): Promise<void> {
   const pending = await sql.prepare<JiraEffectRow>(`SELECT effect_id, issue_id, revision, effect_type,
     status, attempt, details_json FROM correction_jira_effects
@@ -319,14 +342,21 @@ async function recoverJiraEffects(): Promise<void> {
     const row = await readCase(effect.issue_id);
     const details = parseObject(effect.details_json);
     const proofHash = typeof details.proofHash === 'string' ? details.proofHash : '';
-    if (!row || effect.effect_type !== 'project-approved-closure' || row.revision !== effect.revision
-      || row.approval_status !== 'approved' || row.approved_revision !== effect.revision
-      || row.approved_hash !== proofHash) {
+    const isApproval = effect.effect_type === 'project-approved-closure'
+      && row?.approval_status === 'approved'
+      && row.approved_revision === effect.revision
+      && row.approved_hash === proofHash;
+    const isReopen = effect.effect_type === 'project-reopened'
+      && row?.approval_status === 'invalidated'
+      && row.proof_hash === proofHash;
+    if (!row || row.revision !== effect.revision || (!isApproval && !isReopen)) {
       await sql.prepare('UPDATE correction_jira_effects SET status = ?, updated_at = ? WHERE effect_id = ? AND status = ?')
         .bindParams('conflicted', new Date().toISOString(), effect.effect_id, 'pending').execute();
       continue;
     }
-    const expected = approvedProjection(effect.revision, proofHash);
+    const expected = isApproval
+      ? approvedProjection(effect.revision, proofHash)
+      : invalidatedProjection(effect.revision, proofHash);
     try {
       let current = await readJiraProjection(effect.issue_id);
       if (!isMatchingProjection(current, expected)) {
@@ -338,16 +368,23 @@ async function recoverJiraEffects(): Promise<void> {
         current = await readJiraProjection(effect.issue_id);
       }
       if (!isMatchingProjection(current, expected)) throw Object.assign(new Error('Jira projection read-back did not match.'), { status: 409 });
-      await sql.prepare('UPDATE correction_jira_effects SET status = ?, attempt = ?, details_json = ?, updated_at = ? WHERE effect_id = ? AND status = ?')
-        .bindParams('synced', effect.attempt + 1, JSON.stringify({ ...details, receipt: expected }), new Date().toISOString(), effect.effect_id, 'pending').execute();
-      await sql.prepare(`UPDATE correction_case_control SET projection_status = ?
-        WHERE issue_id = ? AND revision = ? AND approval_status = ? AND approved_hash = ?`).bindParams(
-        'synced', effect.issue_id, effect.revision, 'approved', proofHash,
-      ).execute();
+      if (isApproval) {
+        await sql.prepare(`UPDATE correction_case_control SET projection_status = ?
+          WHERE issue_id = ? AND revision = ? AND approval_status = ? AND approved_hash = ?`).bindParams(
+          'synced', effect.issue_id, effect.revision, 'approved', proofHash,
+        ).execute();
+      } else {
+        await sql.prepare(`UPDATE correction_case_control SET projection_status = ?
+          WHERE issue_id = ? AND revision = ? AND approval_status = ? AND proof_hash = ?`).bindParams(
+          'synced', effect.issue_id, effect.revision, 'invalidated', proofHash,
+        ).execute();
+      }
       await appendAudit(effect.issue_id, effect.revision, 'jira-update-synced', 'system-recovery', {
         effectId: effect.effect_id,
         proofHash,
       }, `jira-effect:${effect.effect_id}:synced`);
+      await sql.prepare('UPDATE correction_jira_effects SET status = ?, attempt = ?, details_json = ?, updated_at = ? WHERE effect_id = ? AND status = ?')
+        .bindParams('synced', effect.attempt + 1, JSON.stringify({ ...details, receipt: expected }), new Date().toISOString(), effect.effect_id, 'pending').execute();
     } catch (error: unknown) {
       const statusCode = typeof error === 'object' && error !== null && 'status' in error ? Number((error as { status: unknown }).status) : 0;
       const failure = statusCode === 429 || statusCode >= 500 || statusCode === 0 ? 'transient' : 'permanent';
@@ -358,7 +395,7 @@ async function recoverJiraEffects(): Promise<void> {
       if (status === 'failed') {
         await sql.prepare(`UPDATE correction_case_control SET projection_status = ?
           WHERE issue_id = ? AND revision = ? AND approval_status = ?`).bindParams(
-          'failed', effect.issue_id, effect.revision, 'approved',
+          'failed', effect.issue_id, effect.revision, isApproval ? 'approved' : 'invalidated',
         ).execute();
       }
     }
@@ -578,6 +615,20 @@ async function appendApprovalHistory(
   ).execute();
 }
 
+async function queueReopenEffect(
+  issueId: string,
+  revision: number,
+  proofHash: string,
+  invalidatedApprovedRevision: number,
+): Promise<void> {
+  await sql.prepare(`INSERT IGNORE INTO correction_jira_effects
+    (effect_id, issue_id, revision, effect_type, status, attempt, details_json, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bindParams(
+    `${issueId}:${revision}:reopened`, issueId, revision, 'project-reopened', 'pending', 0,
+    JSON.stringify({ proofHash, invalidatedApprovedRevision }), new Date().toISOString(),
+  ).execute();
+}
+
 function payloadObject(payload: unknown): Record<string, unknown> {
   return payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
 }
@@ -623,11 +674,9 @@ async function updateStep(
   if (result.rows.affectedRows !== 1) throw new Error('Case changed while this action ran. Refresh and retry.');
 
   await persistProofRevision(issueId, proof);
-  await sql.prepare('UPDATE correction_source_events SET status = ?, resulting_revision = ? WHERE event_key = ? AND status = ?')
-    .bindParams('applied', nextRevision, registered.row.event_key, 'pending').execute();
-
   if (wasApproved && row.approved_revision !== null && row.approved_hash) {
     await appendApprovalHistory(issueId, row.approved_revision, row.approved_hash, 'invalidated', actorId, `${desired} evidence created revision ${nextRevision}`);
+    await queueReopenEffect(issueId, nextRevision, proof.inputHash, row.approved_revision);
   }
   await appendAudit(issueId, nextRevision, 'evidence-revision-created', actorId, {
     priorStep: row.step,
@@ -636,6 +685,8 @@ async function updateStep(
     sourceEventId: evidence.eventId,
     duplicate: registered.registration === 'duplicate',
   }, `evidence:${registered.row.event_key}`);
+  await sql.prepare('UPDATE correction_source_events SET status = ?, resulting_revision = ? WHERE event_key = ? AND status = ?')
+    .bindParams('applied', nextRevision, registered.row.event_key, 'pending').execute();
   const updated = await readCase(issueId);
   if (!updated) throw new Error('Updated case could not be reloaded.');
   return view(updated, role);
@@ -838,6 +889,7 @@ resolver.define('reset', async ({ payload, context }) => {
   await persistProofRevision(actor.issueId, proof);
   if (wasApproved && row.approved_revision !== null && row.approved_hash) {
     await appendApprovalHistory(actor.issueId, row.approved_revision, row.approved_hash, 'invalidated', actor.accountId, `Authorized reset created revision ${nextRevision}`);
+    await queueReopenEffect(actor.issueId, nextRevision, proof.inputHash, row.approved_revision);
   }
   await appendAudit(actor.issueId, nextRevision, 'case-reset', actor.accountId, { priorRevision: row.revision, confirmation: true });
   const updated = await readCase(actor.issueId);

@@ -1,6 +1,6 @@
 # Payer Correction Review — build implementation plan
 
-**Status:** implementation in progress. Phase 1 authorization/approval controls and the Phase 2 append-only ledger foundation are implemented. Local tests cover duplicate/conflicting evidence, interrupted registration before and after the case transition, stale-event quarantine, replay equivalence, late reversal and Jira projection retry policy. A controlled two-invocation test on Forge development version 2.5.0 proved recovery of a pending source event into exactly one evidence revision and audit entry. Forge 3.0.0 adds a deterministic Jira issue-property projection worker with read-back verification and finite retries. Gate 2 remains open until a pending Jira effect is completed by the scheduled trigger and observed through the installed app. Follow [binding decisions](DECISIONS.md), [requirements](PRD.md), [system design](SYSTEM-DESIGN.md), and [evaluation plan](EVALUATION-PLAN.md). Work does not advance past a gate until its evidence is recorded.
+**Status:** implementation in progress. Gates 1 and 2 are complete. Phase 1 authorization/approval controls and the Phase 2 append-only ledger, recovery and Jira-projection paths are implemented. Local tests cover duplicate/conflicting evidence, interrupted registration before and after the case transition, stale-event quarantine, replay equivalence, late reversal and finite Jira-projection retries. Live Forge tests proved pending-event recovery, scheduled projection of an exact approved revision/hash, idempotent scheduler retry, and scheduled invalidation after late evidence. See the [pending-event record](docs/verification/phase2-pending-evidence-recovery.md) and [Jira-projection record](docs/verification/phase2-jira-projection-recovery.md). The next implementation gate is the Phase 3 platform feasibility spike. Follow [binding decisions](DECISIONS.md), [requirements](PRD.md), [system design](SYSTEM-DESIGN.md), and [evaluation plan](EVALUATION-PLAN.md). Work does not advance past a gate until its evidence is recorded.
 
 ## MVP definition
 
@@ -55,7 +55,7 @@ The MVP proves one end-to-end synthetic journey: a payer reports a correction fi
 - Old worker cannot publish against a newer active revision.
 - Late reversal identifies the broken line obligation and preserves prior history.
 
-**Gate 2:** full replay and incremental processing produce identical frozen proofs; fault injection leaves the system recoverable.
+**Gate 2 — passed November 24, 2026:** full replay and incremental processing produce identical frozen proofs; interrupted evidence registration and pending Jira effects recover safely; retry is idempotent; late evidence invalidates and replaces the Jira projection with the current revision.
 
 ## Phase 3 — platform feasibility spike
 

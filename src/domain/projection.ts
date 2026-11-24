@@ -2,7 +2,7 @@ export interface ApprovedProjection {
   schemaVersion: 1;
   revision: number;
   proofHash: string;
-  approvalStatus: 'approved';
+  approvalStatus: 'approved' | 'invalidated';
 }
 
 export type ProjectionFailureKind = 'transient' | 'permanent';
@@ -10,6 +10,11 @@ export type ProjectionFailureKind = 'transient' | 'permanent';
 export function approvedProjection(revision: number, proofHash: string): ApprovedProjection {
   if (!Number.isInteger(revision) || revision < 1 || !proofHash) throw new Error('A valid approved revision and proof hash are required.');
   return { schemaVersion: 1, revision, proofHash, approvalStatus: 'approved' };
+}
+
+export function invalidatedProjection(revision: number, proofHash: string): ApprovedProjection {
+  if (!Number.isInteger(revision) || revision < 1 || !proofHash) throw new Error('A valid reopened revision and proof hash are required.');
+  return { schemaVersion: 1, revision, proofHash, approvalStatus: 'invalidated' };
 }
 
 export function isMatchingProjection(value: unknown, expected: ApprovedProjection): boolean {
