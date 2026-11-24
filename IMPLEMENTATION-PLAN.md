@@ -1,6 +1,6 @@
 # Payer Correction Review — build implementation plan
 
-**Status:** implementation in progress. The local Phase 1 authorization/approval controls and Phase 2 append-only ledger foundation are implemented; deployed Forge SQL migration, recovery and reload tests remain gate evidence. Follow [binding decisions](DECISIONS.md), [requirements](PRD.md), [system design](SYSTEM-DESIGN.md), and [evaluation plan](EVALUATION-PLAN.md). Work does not advance past a gate until its evidence is recorded.
+**Status:** implementation in progress. Phase 1 authorization/approval controls and the Phase 2 append-only ledger foundation are implemented. Local tests cover duplicate/conflicting evidence, interrupted registration before and after the case transition, stale-event quarantine, replay equivalence and late reversal. Forge development version 2.4.0 packages and deploys successfully; a deployed fault-injection exercise of SQL recovery remains required before Gate 2 is closed. Follow [binding decisions](DECISIONS.md), [requirements](PRD.md), [system design](SYSTEM-DESIGN.md), and [evaluation plan](EVALUATION-PLAN.md). Work does not advance past a gate until its evidence is recorded.
 
 ## MVP definition
 

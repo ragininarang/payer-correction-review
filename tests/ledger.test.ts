@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyEvidence, contentHash, validateFollowUp } from '../src/domain/ledger';
+import { classifyEvidence, contentHash, planEvidenceRecovery, validateFollowUp } from '../src/domain/ledger';
 import { buildProof } from '../src/domain/proof';
 import { baseInput } from '../src/fixtures/demo';
 
@@ -36,5 +36,34 @@ describe('durable ledger contracts', () => {
     expect(() => validateFollowUp({ expectedRevision: 0, outcome: 'no-response', nextReviewDate: '2026-11-30', note: '', lineIds: ['L12'] }, proof)).toThrow(/changed/);
     expect(() => validateFollowUp({ expectedRevision: 1, outcome: 'no-response', nextReviewDate: '2026-11-30', note: '', lineIds: [] }, proof)).toThrow(/Select/);
     expect(() => validateFollowUp({ expectedRevision: 1, outcome: 'no-response', nextReviewDate: '2026-11-30', note: '', lineIds: ['L13'] }, proof)).toThrow(/not part/);
+  });
+
+  it('recovers a crash after registration but before the case transition', () => {
+    expect(planEvidenceRecovery(1, 'missing', 1, 'corrected')).toEqual({
+      action: 'advance-case',
+      resultingRevision: 2,
+    });
+  });
+
+  it('finishes a crash after the case transition without advancing twice', () => {
+    expect(planEvidenceRecovery(2, 'corrected', 1, 'corrected')).toEqual({
+      action: 'complete-registration',
+      resultingRevision: 2,
+    });
+    expect(planEvidenceRecovery(1, 'missing', 1, 'missing')).toEqual({
+      action: 'complete-registration',
+      resultingRevision: 1,
+    });
+  });
+
+  it('quarantines a pending event that can no longer apply to the case revision', () => {
+    expect(planEvidenceRecovery(3, 'reversed', 1, 'corrected')).toEqual({
+      action: 'quarantine-stale',
+      resultingRevision: null,
+    });
+    expect(planEvidenceRecovery(1, 'missing', 1, 'reversed')).toEqual({
+      action: 'quarantine-stale',
+      resultingRevision: null,
+    });
   });
 });

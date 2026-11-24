@@ -39,6 +39,19 @@ describe('revisioned proof of correction', () => {
     expect(next.inputHash).not.toBe(prior.inputHash);
   });
 
+  it('produces the same frozen proof from incremental processing and full replay', () => {
+    const correctedInput = withFinalReplacement();
+    const incrementalCorrected = buildProof(correctedInput, [], true);
+    const reversedInput = withLateReversal(correctedInput);
+    const incrementalFinal = buildProof(reversedInput, [], true);
+    const replayedFinal = buildProof(withLateReversal(withFinalReplacement()), [], true);
+
+    expect(incrementalCorrected.status).toBe('eligible');
+    expect(incrementalFinal).toEqual(replayedFinal);
+    expect(incrementalFinal.inputHash).toBe(replayedFinal.inputHash);
+    expect(incrementalFinal.obligations.find((item) => item.lineId === 'L07')?.status).toBe('amount-mismatch');
+  });
+
   it('treats repeated identical events as one and conflicting IDs as unsafe', () => {
     const complete = withFinalReplacement();
     const duplicate = { ...complete, events: [...complete.events, complete.events[0]!] };

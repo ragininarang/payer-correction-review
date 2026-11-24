@@ -5,7 +5,14 @@ import { migrationRunner, sql } from '@forge/sql';
 import type { UpdateQueryResponse } from '@forge/sql';
 import { buildProof } from '../domain/proof';
 import type { CorrectionProof, ProofInput } from '../domain/types';
-import { classifyEvidence, contentHash, validateFollowUp, type FollowUpOutcome } from '../domain/ledger';
+import {
+  classifyEvidence,
+  contentHash,
+  planEvidenceRecovery,
+  validateFollowUp,
+  type EvidenceStep,
+  type FollowUpOutcome,
+} from '../domain/ledger';
 import {
   invalidatedStates,
   requireCommand,
@@ -18,7 +25,7 @@ import {
 } from '../domain/workflow';
 import { baseInput, conflictingScopeInput, scopeCounterexample, withFinalReplacement, withLateReversal } from '../fixtures/demo';
 
-type Step = 'missing' | 'corrected' | 'reversed' | 'challenged';
+type Step = EvidenceStep;
 type ResolverContext = Record<string, unknown>;
 
 interface CaseRow {
@@ -44,7 +51,7 @@ interface EvidenceRow {
   resulting_revision: number | null;
   desired_step: Step;
 }
-interface PendingEvidenceRow extends EvidenceRow { issue_id: string }
+interface PendingEvidenceRow extends EvidenceRow { issue_id: string; registered_by: string }
 interface FollowUpRow {
   followup_id: string;
   revision: number;
@@ -227,11 +234,57 @@ export async function runMigration(): Promise<void> {
 export async function runRecovery(): Promise<void> {
   await runMigration();
   const pending = await sql.prepare<PendingEvidenceRow>(`SELECT event_key, issue_id, event_id, content_hash,
-    status, prior_revision, resulting_revision, desired_step FROM correction_source_events
+    status, prior_revision, resulting_revision, desired_step, registered_by FROM correction_source_events
     WHERE status = ? ORDER BY registered_at ASC LIMIT 50`).bindParams('pending').execute();
   for (const event of pending.rows) {
-    const row = await readCase(event.issue_id);
-    if (!row || row.revision <= event.prior_revision || row.step !== event.desired_step) continue;
+    let row = await readCase(event.issue_id);
+    if (!row) {
+      await sql.prepare('UPDATE correction_source_events SET status = ? WHERE event_key = ? AND status = ?')
+        .bindParams('quarantined', event.event_key, 'pending').execute();
+      continue;
+    }
+    const plan = planEvidenceRecovery(row.revision, row.step, event.prior_revision, event.desired_step);
+    if (plan.action === 'quarantine-stale') {
+      await sql.prepare('UPDATE correction_source_events SET status = ? WHERE event_key = ? AND status = ?')
+        .bindParams('quarantined', event.event_key, 'pending').execute();
+      await appendAudit(event.issue_id, row.revision, 'stale-evidence-quarantined', 'system-recovery', {
+        sourceEventId: event.event_id,
+        eventPriorRevision: event.prior_revision,
+        currentRevision: row.revision,
+      }, `stale-evidence:${event.event_key}`);
+      continue;
+    }
+    if (plan.action === 'advance-case') {
+      const nextRevision = plan.resultingRevision!;
+      const proof = proofFor(event.desired_step, event.issue_id, nextRevision);
+      const wasApproved = row.approval_status === 'approved';
+      const next = invalidatedStates(wasApproved);
+      const result = await sql.prepare<UpdateQueryResponse>(`UPDATE correction_case_control SET revision = ?, step = ?,
+        proof_status = ?, approval_status = ?, projection_status = ?, proof_hash = ?, proof_json = ?
+        WHERE issue_id = ? AND revision = ?`).bindParams(
+        nextRevision, event.desired_step, proof.status, next.approvalStatus, next.projectionStatus,
+        proof.inputHash, JSON.stringify(proof), event.issue_id, row.revision,
+      ).execute();
+      if (result.rows.affectedRows !== 1) continue;
+      row = await readCase(event.issue_id);
+      if (!row) continue;
+    }
+    if (row.approval_status === 'invalidated' && row.approved_revision !== null && row.approved_hash) {
+      await appendApprovalHistory(
+        event.issue_id,
+        row.approved_revision,
+        row.approved_hash,
+        'invalidated',
+        event.registered_by,
+        `${event.desired_step} evidence created revision ${row.revision}`,
+      );
+    }
+    await appendAudit(event.issue_id, row.revision, 'evidence-revision-created', event.registered_by, {
+      step: event.desired_step,
+      priorRevision: event.prior_revision,
+      sourceEventId: event.event_id,
+      recovered: true,
+    }, `evidence:${event.event_key}`);
     const proof = JSON.parse(row.proof_json) as CorrectionProof;
     await persistProofRevision(event.issue_id, proof);
     await sql.prepare('UPDATE correction_source_events SET status = ?, resulting_revision = ? WHERE event_key = ? AND status = ?')
@@ -420,11 +473,19 @@ function view(row: CaseRow, role: AppRole): CaseView {
   };
 }
 
-async function appendAudit(issueId: string, revision: number, eventType: string, actorId: string, details: Record<string, unknown>): Promise<void> {
-  await sql.prepare(`INSERT INTO correction_audit_events
+async function appendAudit(
+  issueId: string,
+  revision: number,
+  eventType: string,
+  actorId: string,
+  details: Record<string, unknown>,
+  stableId?: string,
+): Promise<void> {
+  await sql.prepare(`INSERT IGNORE INTO correction_audit_events
     (audit_event_id, issue_id, revision, event_type, actor_id, details_json, occurred_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)`).bindParams(
-    randomUUID(), issueId, revision, eventType, actorId, JSON.stringify(details), new Date().toISOString(),
+    stableId ? contentHash({ issueId, stableId }) : randomUUID(),
+    issueId, revision, eventType, actorId, JSON.stringify(details), new Date().toISOString(),
   ).execute();
 }
 
@@ -436,10 +497,11 @@ async function appendApprovalHistory(
   actorId: string,
   reason: string,
 ): Promise<void> {
-  await sql.prepare(`INSERT INTO correction_approval_history
+  await sql.prepare(`INSERT IGNORE INTO correction_approval_history
     (approval_event_id, issue_id, revision, proof_hash, action, actor_id, reason, occurred_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bindParams(
-    randomUUID(), issueId, revision, proofHash, action, actorId, reason, new Date().toISOString(),
+    contentHash({ issueId, revision, proofHash, action, reason }),
+    issueId, revision, proofHash, action, actorId, reason, new Date().toISOString(),
   ).execute();
 }
 
@@ -494,7 +556,7 @@ async function updateStep(
     priorRevision: row.revision,
     sourceEventId: evidence.eventId,
     duplicate: registered.registration === 'duplicate',
-  });
+  }, `evidence:${registered.row.event_key}`);
   const updated = await readCase(issueId);
   if (!updated) throw new Error('Updated case could not be reloaded.');
   return view(updated, role);

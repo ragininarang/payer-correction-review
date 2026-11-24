@@ -3,6 +3,20 @@ import { bytesToHex } from '@noble/hashes/utils.js';
 import type { CorrectionProof } from './types';
 
 export type EvidenceRegistration = 'new' | 'duplicate' | 'conflict';
+export type EvidenceStep = 'missing' | 'corrected' | 'reversed' | 'challenged';
+export type EvidenceRecoveryAction = 'advance-case' | 'complete-registration' | 'quarantine-stale';
+
+export interface EvidenceRecoveryPlan {
+  action: EvidenceRecoveryAction;
+  resultingRevision: number | null;
+}
+
+const validPriorSteps: Record<EvidenceStep, readonly EvidenceStep[]> = {
+  missing: [],
+  corrected: ['missing'],
+  reversed: ['corrected'],
+  challenged: ['missing', 'corrected', 'reversed'],
+};
 
 export const followUpOutcomes = [
   'payer-researching',
@@ -49,6 +63,29 @@ export function contentHash(value: unknown): string {
 export function classifyEvidence(existingHash: string | null, incomingHash: string): EvidenceRegistration {
   if (existingHash === null) return 'new';
   return existingHash === incomingHash ? 'duplicate' : 'conflict';
+}
+
+/**
+ * Reconciles a pending source-event row with the authoritative case row.
+ * This is deliberately pure so the same crash-recovery rules are testable
+ * without Forge SQL and cannot drift between request and scheduled workers.
+ */
+export function planEvidenceRecovery(
+  caseRevision: number,
+  caseStep: EvidenceStep,
+  eventPriorRevision: number,
+  desiredStep: EvidenceStep,
+): EvidenceRecoveryPlan {
+  if (caseRevision === eventPriorRevision && caseStep === desiredStep) {
+    return { action: 'complete-registration', resultingRevision: caseRevision };
+  }
+  if (caseRevision === eventPriorRevision && validPriorSteps[desiredStep].includes(caseStep)) {
+    return { action: 'advance-case', resultingRevision: caseRevision + 1 };
+  }
+  if (caseRevision === eventPriorRevision + 1 && caseStep === desiredStep) {
+    return { action: 'complete-registration', resultingRevision: caseRevision };
+  }
+  return { action: 'quarantine-stale', resultingRevision: null };
 }
 
 export function validateFollowUp(input: FollowUpInput, proof: CorrectionProof): ValidatedFollowUp {
