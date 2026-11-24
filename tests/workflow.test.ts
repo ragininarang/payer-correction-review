@@ -17,6 +17,10 @@ describe('workflow safety policy', () => {
     expect(can('operator', 'reset')).toBe(true);
     expect(can('supervisor', 'manage-roles')).toBe(false);
     expect(can('operator', 'manage-roles')).toBe(true);
+    expect(can('viewer', 'test-recovery')).toBe(false);
+    expect(can('analyst', 'test-recovery')).toBe(false);
+    expect(can('supervisor', 'test-recovery')).toBe(true);
+    expect(can('operator', 'test-recovery')).toBe(true);
   });
 
   it('allows payer follow-up only for workflow participants', () => {

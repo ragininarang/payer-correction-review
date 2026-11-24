@@ -9,7 +9,7 @@ This repository includes a workspace-local Node.js 24 and Forge CLI installation
 ./scripts/use-local-tools.sh gh auth status
 ```
 
-The local prototype runs without Atlassian or OpenAI credentials. The registered Forge app ID is stored in `manifest.yml`. Development version 2.4.0 is deployed and installed in Jira on the free demo site `one-atlas-fnmi.atlassian.net`, which expires February 21, 2027. Keep all credentials outside Git.
+The local prototype runs without Atlassian or OpenAI credentials. The registered Forge app ID is stored in `manifest.yml`. Development version 2.6.0 is deployed on the free demo site `one-atlas-fnmi.atlassian.net`, which expires February 21, 2027. Version 2.5.0 was used for the controlled recovery test; 2.6.0 was deployed after removing the temporary test flag. Keep all credentials outside Git.
 
 ## One-time Forge connection
 
@@ -37,6 +37,7 @@ The current development slice does not call OpenAI. The key may be held in macOS
 - `npm run build`: production Custom UI bundle.
 - `forge lint`: Forge manifest and packaging validation; requires Forge authentication for some checks.
 - Live Jira smoke test: initialized a Forge SQL case, added final correction evidence, approved revision 2, imported a late reversal and verified that revision 3 invalidated the prior approval.
-- Recovery update: version 2.4.0 is deployed and its recovery decision contract is locally tested. A controlled deployed interruption remains required to prove the pending-event SQL path end to end.
+- Recovery update: a controlled version 2.5.0 test registered a pending correction in one invocation and recovered it in a second invocation. The case advanced once from evidence version 1 to 2 and produced one audit event. See [the verification record](docs/verification/phase2-pending-evidence-recovery.md).
+- Remaining Gate 2 evidence: observe the scheduled trigger completing pending work and fault-test pending Jira-effect recovery.
 
 Generated UI output in `static/build` and Forge working data in `.forge` are intentionally ignored. GitHub Actions rebuilds the UI from the lockfile on every push and pull request.

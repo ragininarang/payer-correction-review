@@ -509,6 +509,12 @@ function payloadObject(payload: unknown): Record<string, unknown> {
   return payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
 }
 
+function requireRecoveryTestEnabled(): void {
+  if (process.env.PCR_ENABLE_RECOVERY_TEST !== 'true') {
+    throw new Error('The controlled recovery test is disabled in this environment.');
+  }
+}
+
 async function updateStep(
   issueId: string,
   desired: Step,
@@ -572,7 +578,43 @@ resolver.define('getCase', async ({ context }) => {
     actorRole: actor.role,
     followUps: await readFollowUps(actor.issueId),
     history: await readHistory(actor.issueId),
+    development: { recoveryTestEnabled: process.env.PCR_ENABLE_RECOVERY_TEST === 'true' },
   };
+});
+
+resolver.define('injectPendingCorrection', async ({ payload, context }) => {
+  const actor = await authorize(context as ResolverContext, 'test-recovery');
+  requireRecoveryTestEnabled();
+  const row = await readCase(actor.issueId);
+  if (!row) throw new Error('Initialize the synthetic case first.');
+  requireExpectedRevision(row.revision, payloadObject(payload).expectedRevision);
+  if (row.step !== 'missing') throw new Error('Reset the synthetic case before running the interrupted-recovery test.');
+  const eventId = `recovery-probe-correction-r${row.revision}`;
+  const registered = await registerEvidenceEvent(
+    actor.issueId,
+    eventId,
+    'development-recovery-probe',
+    'Controlled interrupted correction',
+    'corrected',
+    row.revision,
+    actor.accountId,
+    { fixture: 'final-replacement', lineId: 'L12', signedAmountCents: 10_000, recoveryProbe: true },
+  );
+  return {
+    eventId,
+    status: registered.row.status,
+    priorRevision: registered.row.prior_revision,
+    caseRevision: row.revision,
+  };
+});
+
+resolver.define('runRecoveryTest', async ({ context }) => {
+  const actor = await authorize(context as ResolverContext, 'test-recovery');
+  requireRecoveryTestEnabled();
+  await runRecovery();
+  const row = await readCase(actor.issueId);
+  if (!row) throw new Error('The recovery test case could not be reloaded.');
+  return view(row, actor.role);
 });
 
 resolver.define('initialize', async ({ context }) => {
