@@ -14,6 +14,7 @@ This directory is the **canonical planning authority** for the product. Same-nam
 - [Build implementation plan](IMPLEMENTATION-PLAN.md)
 - [Agent and product evaluation plan](EVALUATION-PLAN.md)
 - [Development setup](DEVELOPMENT.md)
+- [Information architecture, user flows, states and UX writing](UX-SPEC.md)
 
 ## Current build
 

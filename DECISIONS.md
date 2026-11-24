@@ -14,6 +14,7 @@
 | D8 | Hackathon data is generated synthetic data only. Live claims, X12/ERA and PHI ingestion remain disabled. | Production compliance is a later gated workstream, not implied by the demo. |
 | D9 | New project cash spend may not exceed $100. Existing OpenAI credits are excluded from that cash figure but calls remain metered and capped. | Paid calls stay disabled until project and per-run controls are configured and tested. |
 | D10 | The hackathon promise is proof over an independently supplied inventory. If coverage is not confirmed, the only permitted outcome is `Supplied lines checked`, never cohort-wide closure. | Practitioner validation can refine source adapters without weakening the safety claim. |
+| D11 | The canonical case navigation is Summary, Claims, Included claims and evidence, Payer follow-up, and Review history. Closure review is contextual, not a tab. User-facing records use claim ID plus the formal term `service line`; internal line IDs remain hidden. | Interface work follows `UX-SPEC.md`; technical proof/orchestration language is hidden from ordinary users. |
 
 ## Decisions intentionally deferred
 

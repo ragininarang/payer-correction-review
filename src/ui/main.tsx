@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import Breadcrumbs, { BreadcrumbsItem } from '@atlaskit/breadcrumbs';
 import Button from '@atlaskit/button/default/button';
@@ -18,6 +18,7 @@ void setGlobalTheme({ light: 'light', dark: 'dark', colorMode: 'auto' });
 
 type Step = 'missing' | 'corrected' | 'reversed' | 'challenged';
 type Action = 'initialize' | 'addCorrection' | 'approve' | 'addReversal' | 'challenge' | 'reset';
+type ClaimFilter = 'attention' | 'all' | 'corrected';
 
 interface CaseView {
   step: Step;
@@ -27,87 +28,82 @@ interface CaseView {
   actorRole: AppRole;
   mode: 'local' | 'forge';
 }
-
 interface WorkspaceResponse { case: CaseView | null; actorRole: AppRole }
+interface FollowUp { outcome: string; nextReviewDate: string; note: string; count: number }
 
 function proofFor(step: Step): CorrectionProof {
   const input = step === 'missing' ? baseInput : step === 'corrected' ? withFinalReplacement()
     : step === 'reversed' ? withLateReversal(withFinalReplacement()) : conflictingScopeInput;
   return buildProof(input, step === 'challenged' ? [scopeCounterexample] : [], true);
 }
-
 function localCase(step: Step, approval?: CaseView['approval']): CaseView {
-  const proof = proofFor(step);
   const priorWasApproved = approval?.status === 'approved';
   return {
     step,
-    proof,
+    proof: proofFor(step),
     approval: priorWasApproved ? { ...approval, status: 'invalidated' } : { status: 'unapproved', revision: null, proofHash: null },
     projectionStatus: priorWasApproved ? 'pending' : 'not-requested',
     actorRole: 'supervisor',
     mode: 'local',
   };
 }
-
 async function callForge<T>(method: string, payload: Record<string, unknown> = {}): Promise<T> {
   const { invoke } = await import('@forge/bridge');
   return await invoke(method, payload) as T;
 }
-
 function isCaseView(value: unknown): value is CaseView {
   if (!value || typeof value !== 'object') return false;
-  const candidate = value as Partial<CaseView>;
-  return typeof candidate.step === 'string' && typeof candidate.proof === 'object' && candidate.proof !== null
-    && typeof candidate.approval === 'object' && candidate.approval !== null
-    && typeof candidate.projectionStatus === 'string' && typeof candidate.actorRole === 'string';
+  const item = value as Partial<CaseView>;
+  return typeof item.step === 'string' && !!item.proof && !!item.approval && typeof item.projectionStatus === 'string' && typeof item.actorRole === 'string';
 }
-
 function isWorkspaceResponse(value: unknown): value is WorkspaceResponse {
   if (!value || typeof value !== 'object') return false;
-  const candidate = value as Partial<WorkspaceResponse>;
-  return typeof candidate.actorRole === 'string' && (candidate.case === null || isCaseView(candidate.case));
+  const item = value as Partial<WorkspaceResponse>;
+  return typeof item.actorRole === 'string' && (item.case === null || isCaseView(item.case));
 }
-
 function currency(cents: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(cents / 100);
 }
-
 function sentence(value: string): string {
-  const normalized = value.replaceAll('-', ' ');
-  return `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`;
+  const text = value.replaceAll('-', ' ');
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 }
-
-function proofAppearance(status: CorrectionProof['status']): 'success' | 'danger' | 'warning' {
-  return status === 'eligible' ? 'success' : status === 'challenged' ? 'danger' : 'warning';
+function dateLabel(value: string): string {
+  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${value}T00:00:00Z`));
 }
-
-function approvalAppearance(status: ApprovalStatus): 'success' | 'danger' | 'default' {
-  return status === 'approved' ? 'success' : status === 'invalidated' ? 'danger' : 'default';
+function lineName(line: LineObligation): string { return `Claim ${line.claimId} · service line ${line.serviceLineNumber}`; }
+function lineStatus(status: LineObligation['status']): string {
+  if (status === 'corrected') return 'Corrected';
+  if (status === 'missing') return 'Not found';
+  if (status === 'amount-mismatch') return 'Amount differs';
+  return 'Needs review';
 }
-
-function obligationAppearance(status: LineObligation['status']): 'success' | 'danger' | 'warning' {
+function lineAppearance(status: LineObligation['status']): 'success' | 'danger' | 'warning' {
   return status === 'corrected' ? 'success' : status === 'ambiguous' ? 'danger' : 'warning';
 }
 
-function SourceList() {
+function SourceList({ step }: { step: Step }) {
   return <div className="source-list">
-    <article><div className="source-icon">I</div><div><strong>Submitted claims inventory</strong><span>submitted-claims-v1 · 13 lines · Complete</span></div><Lozenge appearance="success">Current</Lozenge></article>
-    <article><div className="source-icon">N</div><div><strong>Payer correction notice</strong><span>payer-notice-v1 · Effective Oct 1–31, 2026</span></div><Lozenge appearance="success">Current</Lozenge></article>
-    <article><div className="source-icon">R</div><div><strong>Original remittance</strong><span>original-era-v1 · Imported Nov 1, 2026</span></div><Lozenge>Verified</Lozenge></article>
-    <article><div className="source-icon">R</div><div><strong>Replacement remittance</strong><span>replacement-era-v1 · 12 linked adjustments</span></div><Lozenge appearance="information">Updated</Lozenge></article>
+    <article><div className="source-icon">C</div><div><strong>Submitted claims list</strong><span>13 service lines · Coverage confirmed</span></div><Lozenge appearance="success">Current</Lozenge></article>
+    <article><div className="source-icon">N</div><div><strong>Payer correction notice</strong><span>Effective Oct 1–31, 2026</span></div><Lozenge appearance="success">Current</Lozenge></article>
+    <article><div className="source-icon">P</div><div><strong>Original payment activity</strong><span>Imported Nov 1, 2026</span></div><Lozenge>Checked</Lozenge></article>
+    <article><div className="source-icon">P</div><div><strong>Replacement payment activity</strong><span>{step === 'missing' ? 11 : 12} adjustments matched</span></div><Lozenge appearance="information">Updated</Lozenge></article>
+    {step === 'reversed' && <article><div className="source-icon">R</div><div><strong>Late reversal activity</strong><span>Imported Nov 23, 2026 · Result changed</span></div><Lozenge appearance="removed">New</Lozenge></article>}
   </div>;
 }
 
-function ActivityTimeline({ view }: { view: CaseView }) {
+function ActivityTimeline({ view, followUp }: { view: CaseView; followUp: FollowUp | null }) {
+  const reversed = view.proof.obligations.find((item) => item.lineId === 'L07');
   const items = [
-    { title: 'Independent inventory registered', detail: '13 submitted lines · source submitted-claims-v1', meta: 'Deterministic intake · Revision 1' },
-    { title: 'Scope rule confirmed', detail: 'Service dates Oct 1–31 · 12 lines included', meta: 'Billing supervisor · approved-rule-v1' },
-    { title: 'Replacement evidence reconciled', detail: `${view.proof.correctedLineCount} of ${view.proof.expectedLineCount} expected lines currently pass`, meta: `Verification · Revision ${view.proof.revision}` },
+    ['Submitted claims list accepted', '13 service lines available; inventory coverage confirmed', 'Automated validation · Evidence version 1'],
+    ['Inclusion criteria confirmed', 'Service dates Oct 1–31 · 12 service lines included', 'Billing supervisor · Nov 22, 2026'],
+    ['Payment activity checked', `${view.proof.correctedLineCount} of ${view.proof.expectedLineCount} included service lines currently match`, `Automated review · Evidence version ${view.proof.revision}`],
   ];
-  if (view.approval.revision) items.push({ title: view.approval.status === 'invalidated' ? 'Prior approval invalidated' : 'Proof approved', detail: `Approval is bound to revision ${view.approval.revision} and its fingerprint`, meta: 'Billing supervisor · append-only record' });
-  if (view.step === 'reversed') items.push({ title: 'Late reversal changed the result', detail: 'Line L07 no longer satisfies its payment obligation', meta: 'Source late-reversal-era-v1 · Revision 3' });
-  if (view.step === 'challenged') items.push({ title: 'Scope counterexample needs review', detail: 'An excluded line may fall within a conflicting notice', meta: 'Challenger · unresolved' });
-  return <ol className="timeline">{items.map((item) => <li key={item.title}><span className="timeline-dot" /><div><strong>{item.title}</strong><p>{item.detail}</p><small>{item.meta}</small></div></li>)}</ol>;
+  if (followUp) items.push(['Payer follow-up recorded', `${followUp.outcome} · ${followUp.count} selected service lines`, `Provider relations · Next review ${followUp.nextReviewDate}`]);
+  if (view.approval.revision) items.push([view.approval.status === 'invalidated' ? 'Earlier closure approval invalidated' : 'Closure approved', view.approval.status === 'invalidated' ? 'New payment activity changed the result' : `Evidence version ${view.approval.revision} was approved`, 'Billing supervisor · Audit history retained']);
+  if (view.step === 'reversed' && reversed) items.push(['Late reversal reopened the review', `${lineName(reversed)} no longer matches the expected payment`, 'Automated review · Evidence version 3']);
+  if (view.step === 'challenged') items.push(['Potential inclusion issue needs review', 'A service line outside the date range may be covered by another payer notice', 'Automated review · Human decision required']);
+  return <ol className="timeline">{items.map(([title, detail, meta]) => <li key={`${title}-${meta}`}><span className="timeline-dot" /><div><strong>{title}</strong><p>{detail}</p><small>{meta}</small></div></li>)}</ol>;
 }
 
 function App() {
@@ -115,42 +111,41 @@ function App() {
   const [hasCase, setHasCase] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [messageTone, setMessageTone] = useState<'success' | 'danger' | 'information'>('information');
   const [forgeMode] = useState(() => window.parent !== window);
   const [selectedTab, setSelectedTab] = useState(0);
   const [selectedLineId, setSelectedLineId] = useState<string | null>('L12');
-  const [exceptionFilter, setExceptionFilter] = useState<'attention' | 'all' | 'corrected'>('attention');
+  const [filter, setFilter] = useState<ClaimFilter>('attention');
+  const [search, setSearch] = useState('');
+  const [selectedLineIds, setSelectedLineIds] = useState<Set<string>>(() => new Set());
   const [approvalOpen, setApprovalOpen] = useState(false);
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const [criteriaOpen, setCriteriaOpen] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
   const [demoOpen, setDemoOpen] = useState(false);
+  const [technicalOpen, setTechnicalOpen] = useState(false);
+  const [followUp, setFollowUp] = useState<FollowUp | null>(null);
 
   useEffect(() => {
     if (!forgeMode) return;
     setBusy(true);
-    callForge<WorkspaceResponse>('getCase')
-      .then((result) => {
-        if (!isWorkspaceResponse(result)) throw new Error('The app returned an invalid workspace response.');
-        if (result.case) {
-          setView({ ...result.case, mode: 'forge' });
-          setHasCase(true);
-        } else {
-          setView((current) => ({ ...current, actorRole: result.actorRole, mode: 'forge' }));
-          setHasCase(false);
-          setMessage('No review exists for this Jira work item.');
-        }
-      })
-      .catch((error: unknown) => setMessage(error instanceof Error ? error.message : 'Unable to load this case.'))
-      .finally(() => setBusy(false));
+    callForge<WorkspaceResponse>('getCase').then((result) => {
+      if (!isWorkspaceResponse(result)) throw new Error('The app returned an invalid workspace response.');
+      if (result.case) { setView({ ...result.case, mode: 'forge' }); setHasCase(true); }
+      else { setView((current) => ({ ...current, actorRole: result.actorRole, mode: 'forge' })); setHasCase(false); }
+    }).catch((error: unknown) => showMessage(error instanceof Error ? error.message : 'Unable to load this correction review.', 'danger')).finally(() => setBusy(false));
   }, [forgeMode]);
 
+  function showMessage(text: string, tone: 'success' | 'danger' | 'information' = 'information') { setMessage(text); setMessageTone(tone); }
   async function act(action: Action) {
     setMessage('');
     if (!forgeMode) {
-      if (action === 'initialize' || action === 'reset') { setView(localCase('missing', view.approval)); setHasCase(true); setSelectedLineId('L12'); }
-      if (action === 'addCorrection') { setView(localCase('corrected', view.approval)); setSelectedLineId(null); }
-      if (action === 'approve' && view.proof.status === 'eligible') setView({ ...view, approval: { status: 'approved', revision: view.proof.revision, proofHash: view.proof.inputHash }, projectionStatus: 'pending' });
-      if (action === 'addReversal') { setView(localCase('reversed', view.approval)); setSelectedLineId('L07'); }
-      if (action === 'challenge') { setView(localCase('challenged', view.approval)); setSelectedLineId('L13'); }
-      setApprovalOpen(false);
-      return;
+      if (action === 'initialize' || action === 'reset') { setView(localCase('missing', view.approval)); setHasCase(true); setSelectedLineId('L12'); setSelectedLineIds(new Set()); showMessage(action === 'reset' ? 'The synthetic case was reset.' : 'Correction review started.', 'success'); }
+      if (action === 'addCorrection') { setView(localCase('corrected', view.approval)); setSelectedLineId(null); showMessage('Replacement payment activity was accepted and checked.', 'success'); }
+      if (action === 'approve' && view.proof.status === 'eligible') { setView({ ...view, approval: { status: 'approved', revision: view.proof.revision, proofHash: view.proof.inputHash }, projectionStatus: 'pending' }); showMessage('Closure approved. The Jira update is pending.', 'success'); }
+      if (action === 'addReversal') { setView(localCase('reversed', view.approval)); setSelectedLineId('L07'); showMessage('New reversal activity reopened the review.', 'information'); }
+      if (action === 'challenge') { setView(localCase('challenged', view.approval)); setSelectedLineId(null); showMessage('A potential inclusion issue needs a human decision.', 'information'); }
+      setApprovalOpen(false); setEvidenceOpen(false); setResetOpen(false); return;
     }
     const payload = action === 'approve' ? { expectedRevision: view.proof.revision, proofHash: view.proof.inputHash }
       : action === 'reset' ? { expectedRevision: view.proof.revision, confirmation: 'RESET CASE' }
@@ -159,104 +154,72 @@ function App() {
     try {
       const result = await callForge<CaseView>(action, payload);
       if (!isCaseView(result)) throw new Error('The app returned an invalid case response.');
-      setView({ ...result, mode: 'forge' });
-      setHasCase(true);
-      setApprovalOpen(false);
-    } catch (error: unknown) {
-      setMessage(error instanceof Error ? error.message : 'The action failed.');
-    } finally { setBusy(false); }
+      setView({ ...result, mode: 'forge' }); setHasCase(true); setApprovalOpen(false); setEvidenceOpen(false); setResetOpen(false);
+      showMessage(action === 'approve' ? 'Closure approved. The Jira update will be tracked separately.' : 'The correction review was updated.', 'success');
+    } catch (error: unknown) { showMessage(error instanceof Error ? error.message : 'The action failed. No financial result was changed.', 'danger'); }
+    finally { setBusy(false); }
   }
 
-  const selectedLine = view.proof.obligations.find((item) => item.lineId === selectedLineId) ?? null;
-  const exceptions = useMemo(() => view.proof.obligations.filter((item) => {
-    if (exceptionFilter === 'attention') return item.status !== 'corrected';
-    if (exceptionFilter === 'corrected') return item.status === 'corrected';
-    return true;
-  }), [view.proof.obligations, exceptionFilter]);
   const attentionCount = view.proof.obligations.filter((item) => item.status !== 'corrected').length + view.proof.findings.filter((item) => item.outcome !== 'refuted').length;
-  const isCurrentApproval = view.approval.status === 'approved' && view.approval.revision === view.proof.revision && view.approval.proofHash === view.proof.inputHash;
-  const nextAction = view.proof.status === 'eligible' && !isCurrentApproval ? 'Approve this proof'
-    : view.approval.status === 'invalidated' ? 'Review changed evidence'
-      : attentionCount > 0 ? 'Review exceptions' : 'View proof';
-
+  const currentApproval = view.approval.status === 'approved' && view.approval.revision === view.proof.revision && view.approval.proofHash === view.proof.inputHash;
+  const selectedLine = view.proof.obligations.find((item) => item.lineId === selectedLineId) ?? null;
+  const claims = useMemo(() => view.proof.obligations.filter((item) => {
+    if (filter === 'attention' && item.status === 'corrected') return false;
+    if (filter === 'corrected' && item.status !== 'corrected') return false;
+    const query = search.trim().toLowerCase();
+    return !query || item.claimId.toLowerCase().includes(query) || item.procedureCode.includes(query);
+  }), [view.proof.obligations, filter, search]);
+  const caseStatus = view.approval.status === 'invalidated' ? { label: 'Reopened', appearance: 'removed' as const }
+    : currentApproval && view.projectionStatus === 'pending' ? { label: 'Approved · Jira update pending', appearance: 'information' as const }
+      : currentApproval ? { label: 'Approved', appearance: 'success' as const }
+        : view.proof.status === 'eligible' ? { label: 'Ready for closure', appearance: 'success' as const }
+          : { label: 'Needs review', appearance: 'moved' as const };
+  const nextAction = view.proof.status === 'eligible' && !currentApproval ? 'Review for closure' : view.approval.status === 'invalidated' ? 'Review what changed' : attentionCount > 0 ? 'Review claims' : 'View review history';
   function primaryAction() {
-    if (view.proof.status === 'eligible' && !isCurrentApproval) return setApprovalOpen(true);
-    if (view.approval.status === 'invalidated' || attentionCount > 0) { setSelectedTab(2); return; }
-    setSelectedTab(3);
+    if (view.proof.status === 'eligible' && !currentApproval) { setApprovalOpen(true); return; }
+    if (attentionCount > 0 || view.approval.status === 'invalidated') { setFilter('attention'); setSelectedTab(1); return; }
+    setSelectedTab(4);
+  }
+  function toggleLine(id: string) { setSelectedLineIds((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next; }); }
+  function prepareFollowUp() {
+    if (!selectedLineIds.size) { showMessage('Select at least one service line before preparing payer follow-up.', 'danger'); return; }
+    setSelectedTab(3); showMessage(`${selectedLineIds.size} service line${selectedLineIds.size === 1 ? '' : 's'} added to payer follow-up.`);
+  }
+  function saveFollowUp(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const data = new FormData(event.currentTarget);
+    const item = { outcome: String(data.get('outcome') || ''), nextReviewDate: String(data.get('nextReviewDate') || ''), note: String(data.get('note') || ''), count: selectedLineIds.size };
+    if (!item.outcome || !item.nextReviewDate) { showMessage('Choose an outcome and next review date.', 'danger'); return; }
+    setFollowUp(item); showMessage('Payer follow-up was recorded. The financial result did not change.', 'success');
   }
 
-  if (!hasCase) return <main className="empty-shell">
-    <div className="product-mark">PCR</div><h1>No correction review yet</h1><p>Initialize a synthetic case from this Jira work item. No model call or payer communication will occur.</p>
-    <Button appearance="primary" isDisabled={busy || !can(view.actorRole, 'initialize')} onClick={() => void act('initialize')}>Initialize review</Button>
-    {message && <p role="status" className="inline-error">{message}</p>}
-  </main>;
+  if (!hasCase) return <main className="empty-shell"><div className="product-mark">PCR</div><h1>No correction review yet</h1><p>Start a review for this Jira work item using synthetic claims and payment activity. No payer will be contacted.</p><Button appearance="primary" isDisabled={busy || !can(view.actorRole, 'initialize')} onClick={() => void act('initialize')}>Start correction review</Button></main>;
 
   return <main className="app-shell">
-    <header className="page-header">
-      <Breadcrumbs><BreadcrumbsItem text="Payer correction reviews" /><BreadcrumbsItem text="PCR-1042" /></Breadcrumbs>
-      <div className="title-row">
-        <div><div className="title-with-status"><h1>October payment correction</h1><Lozenge appearance={proofAppearance(view.proof.status)}>{sentence(view.proof.status)}</Lozenge></div><p>Payer Demo · Professional claims · Updated through Nov 22, 2026</p></div>
-        <div className="header-actions"><Button onClick={() => setSelectedTab(1)}>Add evidence</Button><Button appearance="primary" isDisabled={busy || (view.proof.status === 'eligible' && !can(view.actorRole, 'approve'))} onClick={primaryAction}>{nextAction}</Button></div>
-      </div>
-      <div className="case-meta"><span>Jira work item <strong>PCR-1042</strong></span><span>Revision <strong>{view.proof.revision}</strong></span><span>Role <strong>{sentence(view.actorRole)}</strong></span><span>Data <strong>Synthetic</strong></span></div>
-    </header>
+    <header className="page-header"><Breadcrumbs><BreadcrumbsItem text="Payer correction reviews" /><BreadcrumbsItem text="PCR-1042" /></Breadcrumbs><div className="title-row"><div><div className="title-with-status"><h1>October payment correction</h1><Lozenge appearance={caseStatus.appearance}>{caseStatus.label}</Lozenge></div><p>Payer Demo · Professional claims · Evidence checked through Nov 22, 2026</p></div><div className="header-actions"><Button onClick={() => setEvidenceOpen(true)}>Add evidence</Button><Button appearance="primary" onClick={primaryAction}>{nextAction}</Button></div></div><div className="case-meta"><span>Jira work item <strong>PCR-1042</strong></span><span>Evidence version <strong>{view.proof.revision}</strong></span><span>Your role <strong>{sentence(view.actorRole)}</strong></span><span><strong>Synthetic data only</strong></span></div></header>
+    {message && <div role="status" className={`message-bar ${messageTone}`}>{message}<button aria-label="Dismiss message" onClick={() => setMessage('')}>×</button></div>}
+    <Tabs id="case-workspace" selected={selectedTab} onChange={setSelectedTab}><TabList><Tab>Summary</Tab><Tab>Claims {attentionCount ? `(${attentionCount})` : ''}</Tab><Tab>Included claims and evidence</Tab><Tab>Payer follow-up</Tab><Tab>Review history</Tab></TabList>
+      <TabPanel><div className="tab-content overview-grid"><section className="main-column">
+        {view.approval.status === 'invalidated' ? <SectionMessage appearance="warning" title="New payment activity reopened this review"><p>An earlier closure approval is no longer current. Review the affected claim before approving again.</p></SectionMessage> : attentionCount ? <SectionMessage appearance="warning" title={`${attentionCount} service line${attentionCount === 1 ? ' needs' : 's need'} review`}><p>Resolve the missing, different, or uncertain results before this correction review can close.</p></SectionMessage> : currentApproval ? <SectionMessage appearance="success" title="Closure is approved"><p>The financial decision is current. The Jira update is {sentence(view.projectionStatus).toLowerCase()}.</p></SectionMessage> : <SectionMessage appearance="information" title="Ready for closure"><p>All included service lines match the expected payment. A billing supervisor must approve this evidence version.</p></SectionMessage>}
+        <div className="section-heading"><div><h2>Correction result</h2><p>Based on the submitted claims list and accepted payment activity</p></div><Button appearance="subtle" onClick={() => { setFilter('all'); setSelectedTab(1); }}>View claims</Button></div>
+        <div className="result-list"><button onClick={() => { setFilter('all'); setSelectedTab(1); }}><span>Included service lines</span><strong>{view.proof.expectedLineCount}</strong><small>From the confirmed claims list</small></button><button onClick={() => { setFilter('corrected'); setSelectedTab(1); }}><span>Corrected as expected</span><strong>{view.proof.correctedLineCount}</strong><small>Payment activity matches</small></button><button onClick={() => { setFilter('attention'); setSelectedTab(1); }}><span>Needs review</span><strong>{attentionCount}</strong><small>Missing, different, or uncertain</small></button><div><span>Amount still unresolved</span><strong>{currency(view.proof.unresolvedCents)}</strong><small>Known difference; not recovered cash</small></div></div>
+        <div className="section-heading"><div><h2>Recommended next step</h2><p>What the current evidence supports</p></div></div><div className="next-action-card"><div className="next-number">1</div><div><strong>{nextAction}</strong><p>{view.proof.status === 'eligible' ? 'Check the counts and evidence version before approving closure.' : 'Open the affected claim and decide what information is needed.'}</p></div><Button appearance="primary" onClick={primaryAction}>{nextAction}</Button></div>
+      </section><aside className="context-column"><section><h2>Review details</h2><dl><div><dt>Correction review</dt><dd><Lozenge appearance={caseStatus.appearance}>{caseStatus.label}</Lozenge></dd></div><div><dt>Supervisor approval</dt><dd>{view.approval.status === 'unapproved' ? 'Not approved' : sentence(view.approval.status)}</dd></div><div><dt>Jira update</dt><dd>{view.projectionStatus === 'not-requested' ? 'Not started' : sentence(view.projectionStatus)}</dd></div><div><dt>Claims-list coverage</dt><dd>Confirmed</dd></div><div><dt>Included dates</dt><dd>Oct 1–31, 2026</dd></div></dl></section><section><h2>Progress</h2><ol className="workflow"><li className="done">Documents accepted</li><li className="done">Inclusion criteria confirmed</li><li className="done">Payment activity checked</li><li className={view.proof.status === 'challenged' ? 'current' : 'done'}>Potential issues checked</li><li className={currentApproval ? 'done' : 'current'}>Supervisor closure decision</li></ol></section></aside></div></TabPanel>
 
-    {message && <div role="status" className="message-bar">{message}</div>}
+      <TabPanel><div className="tab-content"><div className="section-heading"><div><h2>Claims</h2><p>Review included service lines and prepare unresolved items for payer follow-up</p></div>{selectedLineIds.size > 0 && <Button appearance="primary" onClick={prepareFollowUp}>Prepare payer follow-up ({selectedLineIds.size})</Button>}</div><div className="claim-toolbar"><label className="search-field"><span className="sr-only">Search claims</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search claim ID or procedure code" /></label><div className="filter-group"><Button appearance={filter === 'attention' ? 'primary' : 'default'} onClick={() => setFilter('attention')}>Needs review</Button><Button appearance={filter === 'all' ? 'primary' : 'default'} onClick={() => setFilter('all')}>All</Button><Button appearance={filter === 'corrected' ? 'primary' : 'default'} onClick={() => setFilter('corrected')}>Corrected</Button></div></div>
+        <div className="exception-workspace"><div className="table-container"><table><thead><tr><th><span className="sr-only">Select</span></th><th>Claim and service line</th><th>Service</th><th>Expected</th><th>Observed</th><th>Status</th></tr></thead><tbody>{claims.map((item) => <tr key={item.lineId} className={selectedLineId === item.lineId ? 'selected-row' : ''} onClick={() => setSelectedLineId(item.lineId)}><td><input aria-label={`Select ${lineName(item)}`} type="checkbox" checked={selectedLineIds.has(item.lineId)} onChange={() => toggleLine(item.lineId)} onClick={(event) => event.stopPropagation()} /></td><td><button className="line-link" onClick={() => setSelectedLineId(item.lineId)}>{item.claimId}<span>Service line {item.serviceLineNumber}</span></button></td><td>{dateLabel(item.serviceDate)}<span className="cell-subtext">Procedure {item.procedureCode}</span></td><td>{currency(item.expectedNetCents)}</td><td>{item.observedNetCents === null ? 'Unknown' : currency(item.observedNetCents)}</td><td><Lozenge appearance={lineAppearance(item.status)}>{lineStatus(item.status)}</Lozenge></td></tr>)}</tbody></table>{!claims.length && <div className="table-empty"><h3>No claims match</h3><p>Clear the search or choose another filter.</p><Button onClick={() => { setSearch(''); setFilter('all'); }}>Show all claims</Button></div>}</div>
+          <aside className="line-panel">{selectedLine ? <><div><span className="overline">Claim details</span><h2>{selectedLine.claimId}</h2><Lozenge appearance={lineAppearance(selectedLine.status)}>{lineStatus(selectedLine.status)}</Lozenge><p className="panel-subtitle">Service line {selectedLine.serviceLineNumber} · {dateLabel(selectedLine.serviceDate)} · Procedure {selectedLine.procedureCode}</p></div><dl><div><dt>Expected payment</dt><dd>{currency(selectedLine.expectedNetCents)}</dd></div><div><dt>Payment found</dt><dd>{selectedLine.observedNetCents === null ? 'Unknown' : currency(selectedLine.observedNetCents)}</dd></div><div><dt>Amount still unresolved</dt><dd>{currency(Math.max(0, selectedLine.expectedNetCents - (selectedLine.observedNetCents ?? 0)))}</dd></div></dl><div className="reason"><strong>Why this result</strong><p>{selectedLine.status === 'corrected' ? 'Accepted payment activity matches the expected amount.' : selectedLine.status === 'missing' ? 'No replacement payment was found before the evidence cutoff.' : selectedLine.status === 'ambiguous' ? 'The reversal or adjustment relationship cannot be confirmed.' : 'The payment found does not match the expected amount.'}</p></div><div className="evidence-chain"><strong>Documents checked</strong><button><span>Submitted claims list</span><small>Current</small></button>{selectedLine.eventIds.length > 0 && <button><span>Payment activity</span><small>{selectedLine.eventIds.length} record{selectedLine.eventIds.length === 1 ? '' : 's'}</small></button>}</div><Button shouldFitContainer onClick={() => toggleLine(selectedLine.lineId)}>{selectedLineIds.has(selectedLine.lineId) ? 'Remove from payer follow-up' : 'Add to payer follow-up'}</Button></> : <div className="panel-empty"><h3>Select a claim</h3><p>Choose a row to see its payment result and documents checked.</p></div>}</aside></div></div></TabPanel>
 
-    <Tabs id="case-workspace" selected={selectedTab} onChange={setSelectedTab}>
-      <TabList>
-        <Tab>Overview</Tab><Tab>Scope and sources</Tab><Tab>Exceptions {attentionCount > 0 ? `(${attentionCount})` : ''}</Tab><Tab>Proof and approval</Tab><Tab>Activity</Tab>
-      </TabList>
+      <TabPanel><div className="tab-content split-page"><section className="main-column"><div className="section-heading"><div><h2>Included claims and evidence</h2><p>See why claims are included and which documents support the review</p></div><Button onClick={() => setEvidenceOpen(true)}>Add evidence</Button></div><SourceList step={view.step} /></section><aside className="context-column"><section><h2>Confirmed inclusion criteria</h2><dl><div><dt>Payer</dt><dd>Payer Demo</dd></div><div><dt>Service dates</dt><dd>Oct 1–31, 2026</dd></div><div><dt>Starting list</dt><dd>Submitted claims</dd></div><div><dt>Expected payment</dt><dd>$100.00 per service line</dd></div><div><dt>Confirmed by</dt><dd>Billing supervisor</dd></div></dl><Button appearance="subtle" onClick={() => setCriteriaOpen(true)}>View criteria and cited notice</Button></section><SectionMessage appearance="information" title="Payment files do not decide which claims are included"><p>The claims list and confirmed payer notice define the included service lines before payment activity is checked.</p></SectionMessage></aside></div></TabPanel>
 
-      <TabPanel>
-        <div className="tab-content overview-grid">
-          <section className="main-column">
-            {view.approval.status === 'invalidated' ? <SectionMessage appearance="warning" title="New evidence invalidated the prior approval"><p>Revision {view.proof.revision} contains a reversal for line L07. Review the changed obligation before this case can be approved again.</p></SectionMessage>
-              : attentionCount > 0 ? <SectionMessage appearance="warning" title={`${attentionCount} item${attentionCount === 1 ? '' : 's'} need attention`}><p>The proof remains open until every expected line passes and material challenges are resolved.</p></SectionMessage>
-                : isCurrentApproval ? <SectionMessage appearance="success" title="This proof is approved"><p>Financial approval is current. Jira projection is {sentence(view.projectionStatus).toLowerCase()}.</p></SectionMessage>
-                  : <SectionMessage appearance="information" title="The evidence supports closure"><p>All line obligations pass. A supervisor must approve this exact revision and fingerprint.</p></SectionMessage>}
+      <TabPanel><div className="tab-content follow-up-page"><div className="section-heading"><div><h2>Payer follow-up</h2><p>Record contact about unresolved items. A note never changes the financial result.</p></div></div>{!selectedLineIds.size ? <div className="empty-state"><h3>No claims selected</h3><p>Select unresolved service lines from Claims before preparing payer follow-up.</p><Button appearance="primary" onClick={() => { setFilter('attention'); setSelectedTab(1); }}>Choose claims</Button></div> : <div className="follow-up-grid"><section className="selected-claims"><h3>Selected for follow-up</h3>{view.proof.obligations.filter((item) => selectedLineIds.has(item.lineId)).map((item) => <article key={item.lineId}><div><strong>{lineName(item)}</strong><span>{dateLabel(item.serviceDate)} · Procedure {item.procedureCode}</span></div><span>{currency(Math.max(0, item.expectedNetCents - (item.observedNetCents ?? 0)))} unresolved</span></article>)}</section><form className="follow-up-form" onSubmit={saveFollowUp}><h3>Record payer contact</h3><label>Outcome<select name="outcome" defaultValue={followUp?.outcome ?? ''}><option value="" disabled>Choose an outcome</option><option>Payer researching</option><option>Additional information requested</option><option>Correction promised</option><option>Payer disputes correction</option><option>No response</option></select></label><label>Next review date<input name="nextReviewDate" type="date" defaultValue={followUp?.nextReviewDate ?? '2026-11-30'} /></label><label>Internal note<textarea name="note" rows={4} defaultValue={followUp?.note ?? ''} placeholder="What should the next person know?" /></label><SectionMessage appearance="information"><p>Saving this contact does not mark claims as paid. Add new payment evidence separately.</p></SectionMessage><Button appearance="primary" type="submit">Save payer follow-up</Button></form></div>}</div></TabPanel>
 
-            <div className="section-heading"><div><h2>Reconciliation result</h2><p>What the submitted inventory and remittances currently support</p></div><Button appearance="subtle" onClick={() => setSelectedTab(2)}>View all lines</Button></div>
-            <div className="result-list">
-              <button onClick={() => { setExceptionFilter('all'); setSelectedTab(2); }}><span>Expected lines</span><strong>{view.proof.expectedLineCount}</strong><small>Independent submitted inventory</small></button>
-              <button onClick={() => { setExceptionFilter('corrected'); setSelectedTab(2); }}><span>Corrected as expected</span><strong>{view.proof.correctedLineCount}</strong><small>Observed net matches approved expectation</small></button>
-              <button onClick={() => { setExceptionFilter('attention'); setSelectedTab(2); }}><span>Need attention</span><strong>{attentionCount}</strong><small>Missing, mismatched, ambiguous, or challenged</small></button>
-              <div><span>Known unresolved amount</span><strong>{currency(view.proof.unresolvedCents)}</strong><small>Adjudicated exposure, not recovered cash</small></div>
-            </div>
-
-            <div className="section-heading"><div><h2>Next justified action</h2><p>Based on the current evidence—not agent confidence</p></div></div>
-            <div className="next-action-card"><div className="next-number">1</div><div><strong>{nextAction}</strong><p>{view.proof.status === 'eligible' ? 'Confirm the revision and fingerprint before approval.' : 'Open the affected line, inspect its evidence chain, and decide what information is needed.'}</p></div><Button appearance="primary" onClick={primaryAction}>{nextAction}</Button></div>
-          </section>
-
-          <aside className="context-column">
-            <section><h2>Case details</h2><dl><div><dt>Proof</dt><dd><Lozenge appearance={proofAppearance(view.proof.status)}>{sentence(view.proof.status)}</Lozenge></dd></div><div><dt>Human approval</dt><dd><Lozenge appearance={approvalAppearance(view.approval.status)}>{sentence(view.approval.status)}</Lozenge></dd></div><div><dt>Jira projection</dt><dd>{sentence(view.projectionStatus)}</dd></div><div><dt>Inventory coverage</dt><dd>Complete</dd></div><div><dt>Effective period</dt><dd>Oct 1–31, 2026</dd></div><div><dt>Evidence cutoff</dt><dd>Nov 22, 12:00 UTC</dd></div></dl></section>
-            <section><h2>Workflow</h2><ol className="workflow"><li className="done">Inputs validated</li><li className="done">Scope confirmed</li><li className="done">Lines reconciled</li><li className={view.proof.status === 'challenged' ? 'current' : 'done'}>Counterexamples checked</li><li className={isCurrentApproval ? 'done' : 'current'}>Supervisor approval</li></ol></section>
-          </aside>
-        </div>
-      </TabPanel>
-
-      <TabPanel>
-        <div className="tab-content split-page"><section className="main-column"><div className="section-heading"><div><h2>Scope and sources</h2><p>Why these lines belong in this correction review</p></div><Button>Add source</Button></div><SourceList /></section><aside className="context-column"><section><h2>Approved population rule</h2><dl><div><dt>Payer</dt><dd>Payer Demo</dd></div><div><dt>Service dates</dt><dd>Oct 1–31, 2026</dd></div><div><dt>Inventory basis</dt><dd>Submitted claims</dd></div><div><dt>Expected net</dt><dd>$100.00 per line</dd></div><div><dt>Confirmed by</dt><dd>Billing supervisor</dd></div></dl><Button appearance="subtle">Review cited passage</Button></section><SectionMessage appearance="information" title="Scope is independently established"><p>Remittance rows are not used to decide which claims should have been corrected.</p></SectionMessage></aside></div>
-      </TabPanel>
-
-      <TabPanel>
-        <div className="tab-content"><div className="section-heading"><div><h2>Line obligations</h2><p>Select a line to inspect its expected amount, adjustment chain, and source references</p></div><div className="filter-group"><Button appearance={exceptionFilter === 'attention' ? 'primary' : 'default'} onClick={() => setExceptionFilter('attention')}>Needs attention</Button><Button appearance={exceptionFilter === 'all' ? 'primary' : 'default'} onClick={() => setExceptionFilter('all')}>All lines</Button><Button appearance={exceptionFilter === 'corrected' ? 'primary' : 'default'} onClick={() => setExceptionFilter('corrected')}>Corrected</Button></div></div>
-          <div className="exception-workspace"><div className="table-container"><table><thead><tr><th>Line</th><th>Service date</th><th>Expected</th><th>Observed</th><th>Status</th><th>Evidence</th></tr></thead><tbody>{exceptions.map((item) => <tr key={item.lineId} className={selectedLineId === item.lineId ? 'selected-row' : ''} onClick={() => setSelectedLineId(item.lineId)}><td><button className="line-link" onClick={() => setSelectedLineId(item.lineId)}>{item.lineId}</button></td><td>Oct 15, 2026</td><td>{currency(item.expectedNetCents)}</td><td>{item.observedNetCents === null ? 'Unknown' : currency(item.observedNetCents)}</td><td><Lozenge appearance={obligationAppearance(item.status)}>{sentence(item.status)}</Lozenge></td><td>{item.eventIds.length} event{item.eventIds.length === 1 ? '' : 's'}</td></tr>)}</tbody></table>{exceptions.length === 0 && <div className="table-empty"><h3>No lines match this filter</h3><p>Choose another filter to continue reviewing the case.</p></div>}</div>
-            <aside className="line-panel">{selectedLine ? <><div><span className="overline">Line obligation</span><h2>{selectedLine.lineId}</h2><Lozenge appearance={obligationAppearance(selectedLine.status)}>{sentence(selectedLine.status)}</Lozenge></div><dl><div><dt>Expected net</dt><dd>{currency(selectedLine.expectedNetCents)}</dd></div><div><dt>Observed net</dt><dd>{selectedLine.observedNetCents === null ? 'Unknown' : currency(selectedLine.observedNetCents)}</dd></div><div><dt>Difference</dt><dd>{currency(Math.max(0, selectedLine.expectedNetCents - (selectedLine.observedNetCents ?? 0)))}</dd></div></dl><div className="reason"><strong>Why this result</strong><p>{selectedLine.reason}</p></div><div className="evidence-chain"><strong>Evidence chain</strong>{selectedLine.sourceIds.map((source) => <button key={source}>{source}<span>Open source</span></button>)}</div><Button appearance="primary">Request evidence</Button></> : <div className="panel-empty"><h3>Select a line</h3><p>Its evidence chain and next action will appear here.</p></div>}</aside>
-          </div>
-        </div>
-      </TabPanel>
-
-      <TabPanel>
-        <div className="tab-content proof-page"><section className="main-column"><div className="section-heading"><div><h2>Proof of correction</h2><p>Closure requirements for revision {view.proof.revision}</p></div><Lozenge appearance={proofAppearance(view.proof.status)}>{sentence(view.proof.status)}</Lozenge></div><ul className="obligation-checklist"><li className="pass"><strong>Population is independently established</strong><span>12 expected lines from a complete submitted-claims inventory</span></li><li className="pass"><strong>Rule and expected payment are confirmed</strong><span>approved-rule-v1 · $100.00 net per line</span></li><li className={attentionCount === 0 ? 'pass' : 'fail'}><strong>Every line has a complete supported adjustment chain</strong><span>{attentionCount === 0 ? 'All line obligations pass' : `${attentionCount} obligation${attentionCount === 1 ? '' : 's'} remain open`}</span></li><li className={view.proof.status === 'challenged' ? 'fail' : 'pass'}><strong>No material counterexample remains unresolved</strong><span>{view.proof.status === 'challenged' ? 'Scope challenge needs a human decision' : 'Bounded counterexample search completed'}</span></li><li className={isCurrentApproval ? 'pass' : 'waiting'}><strong>Supervisor approved this exact proof</strong><span>{isCurrentApproval ? `Approved revision ${view.approval.revision}` : 'Approval has not been recorded for this revision'}</span></li></ul></section><aside className="context-column"><section><h2>Revision fingerprint</h2><p className="hash">{view.proof.inputHash}</p><p className="subtle-copy">The fingerprint makes the record reproducible. It does not prove that the source data is true.</p></section><section><h2>Approval</h2><dl><div><dt>Status</dt><dd><Lozenge appearance={approvalAppearance(view.approval.status)}>{sentence(view.approval.status)}</Lozenge></dd></div><div><dt>Approved revision</dt><dd>{view.approval.revision ?? '—'}</dd></div><div><dt>Jira projection</dt><dd>{sentence(view.projectionStatus)}</dd></div></dl><Button appearance="primary" isDisabled={busy || view.proof.status !== 'eligible' || isCurrentApproval || !can(view.actorRole, 'approve')} onClick={() => setApprovalOpen(true)}>Approve revision {view.proof.revision}</Button></section></aside></div>
-      </TabPanel>
-
-      <TabPanel><div className="tab-content activity-page"><div className="section-heading"><div><h2>Case activity</h2><p>Source versions, agent work, deterministic checks, and human decisions</p></div><Button>Filter activity</Button></div><ActivityTimeline view={view} /></div></TabPanel>
+      <TabPanel><div className="tab-content activity-page"><div className="section-heading"><div><h2>Review history</h2><p>Who or what changed the review, in order</p></div></div><ActivityTimeline view={view} followUp={followUp} /><section className="technical-disclosure"><button className="disclosure-button" onClick={() => setTechnicalOpen(!technicalOpen)} aria-expanded={technicalOpen}><span>Technical and automation details</span><span>{technicalOpen ? 'Hide' : 'Show'}</span></button>{technicalOpen && <div className="technical-body"><dl><div><dt>Internal case</dt><dd>{view.proof.caseId}</dd></div><div><dt>Evidence version</dt><dd>{view.proof.revision}</dd></div><div><dt>Technical identifier</dt><dd className="hash">{view.proof.inputHash}</dd></div><div><dt>Automated run</dt><dd>No failures</dd></div></dl><p className="subtle-copy">Operators use this area to diagnose failed automated runs. It cannot change the financial result.</p></div>}</section><div className="demo-controls"><button className="demo-toggle" onClick={() => setDemoOpen(!demoOpen)}><span>Demo scenario controls</span><small>{demoOpen ? 'Hide' : 'Show'} synthetic state changes</small></button>{demoOpen && <div className="demo-actions"><Button onClick={() => void act('addCorrection')}>Import final correction</Button><Button onClick={() => void act('addReversal')}>Import late reversal</Button><Button onClick={() => void act('challenge')}>Find inclusion conflict</Button><Button appearance="danger" onClick={() => setResetOpen(true)}>Reset synthetic case</Button></div>}</div></div></TabPanel>
     </Tabs>
 
-    <section className="demo-controls"><button className="demo-toggle" onClick={() => setDemoOpen((open) => !open)} aria-expanded={demoOpen}><span>Demo data controls</span><small>Use synthetic evidence to test the workflow</small></button>{demoOpen && <div className="demo-actions"><Button isDisabled={busy || view.step !== 'missing'} onClick={() => void act('addCorrection')}>Import final correction</Button><Button isDisabled={busy || view.step !== 'corrected'} onClick={() => void act('addReversal')}>Import late reversal</Button><Button isDisabled={busy} onClick={() => void act('challenge')}>Add scope challenge</Button><Button appearance="danger" isDisabled={busy || !can(view.actorRole, 'reset')} onClick={() => void act('reset')}>Reset synthetic case</Button></div>}</section>
-
-    <ModalTransition>{approvalOpen && <Modal onClose={() => setApprovalOpen(false)}><ModalHeader hasCloseButton><ModalTitle>Approve proof revision {view.proof.revision}</ModalTitle></ModalHeader><ModalBody><p>You are approving the exact evidence revision shown below. New evidence will invalidate this approval.</p><dl className="modal-summary"><div><dt>Expected lines</dt><dd>{view.proof.expectedLineCount}</dd></div><div><dt>Corrected</dt><dd>{view.proof.correctedLineCount}</dd></div><div><dt>Unresolved amount</dt><dd>{currency(view.proof.unresolvedCents)}</dd></div><div><dt>Fingerprint</dt><dd className="hash">{view.proof.inputHash}</dd></div></dl></ModalBody><ModalFooter><Button appearance="subtle" onClick={() => setApprovalOpen(false)}>Cancel</Button><Button appearance="primary" isDisabled={busy} onClick={() => void act('approve')}>Approve revision {view.proof.revision}</Button></ModalFooter></Modal>}</ModalTransition>
+    <ModalTransition>{evidenceOpen && <Modal onClose={() => setEvidenceOpen(false)}><ModalHeader><ModalTitle>Add payment evidence</ModalTitle></ModalHeader><ModalBody><p>The app checks access, identity, format, duplicates, and conflicts before updating the result.</p><div className="source-choice selected"><div><strong>Replacement payment activity</strong><span>Synthetic remittance file · 12 adjustments</span></div><Lozenge appearance="success">Ready</Lozenge></div><SectionMessage appearance="information" title="Required documents must be valid first"><p>This creates a new evidence version. If the result changes, any current closure approval is invalidated.</p></SectionMessage></ModalBody><ModalFooter><Button appearance="subtle" onClick={() => setEvidenceOpen(false)}>Cancel</Button><Button appearance="primary" isDisabled={busy || view.step !== 'missing'} onClick={() => void act('addCorrection')}>{view.step === 'missing' ? 'Add and check evidence' : 'Evidence already added'}</Button></ModalFooter></Modal>}</ModalTransition>
+    <ModalTransition>{criteriaOpen && <Modal onClose={() => setCriteriaOpen(false)}><ModalHeader><ModalTitle>Inclusion criteria</ModalTitle></ModalHeader><ModalBody><p>These criteria decide which submitted service lines should have received the payer correction.</p><dl className="modal-summary"><div><dt>Payer</dt><dd>Payer Demo</dd></div><div><dt>Service dates</dt><dd>Oct 1–31, 2026</dd></div><div><dt>Included</dt><dd>12 service lines</dd></div><div><dt>Excluded</dt><dd>1 service line</dd></div></dl><div className="quoted-source"><strong>Cited payer notice</strong><p>“Professional claims with dates of service from October 1 through October 31, 2026 are included in this correction.”</p></div><p className="subtle-copy">Changing these criteria must show the population difference and create a new evidence version.</p></ModalBody><ModalFooter><Button appearance="primary" onClick={() => setCriteriaOpen(false)}>Done</Button></ModalFooter></Modal>}</ModalTransition>
+    <ModalTransition>{approvalOpen && <Modal onClose={() => setApprovalOpen(false)}><ModalHeader><ModalTitle>Review for closure</ModalTitle></ModalHeader><ModalBody><p>You are approving the financial result for this exact evidence version. New evidence will reopen the review if it changes the result.</p><dl className="modal-summary"><div><dt>Included service lines</dt><dd>{view.proof.expectedLineCount}</dd></div><div><dt>Corrected as expected</dt><dd>{view.proof.correctedLineCount}</dd></div><div><dt>Amount still unresolved</dt><dd>{currency(view.proof.unresolvedCents)}</dd></div><div><dt>Evidence version</dt><dd>{view.proof.revision}</dd></div></dl><details><summary>Technical identifier</summary><p className="hash">{view.proof.inputHash}</p></details></ModalBody><ModalFooter><Button appearance="subtle" onClick={() => setApprovalOpen(false)}>Cancel</Button><Button appearance="primary" isDisabled={busy} onClick={() => void act('approve')}>Approve closure</Button></ModalFooter></Modal>}</ModalTransition>
+    <ModalTransition>{resetOpen && <Modal onClose={() => setResetOpen(false)}><ModalHeader><ModalTitle>Reset this synthetic case?</ModalTitle></ModalHeader><ModalBody><SectionMessage appearance="warning" title="This clears the current demo state"><p>Claims, evidence, selections, and follow-up entries return to the starting scenario. Production audit history would remain.</p></SectionMessage></ModalBody><ModalFooter><Button appearance="subtle" onClick={() => setResetOpen(false)}>Cancel</Button><Button appearance="danger" onClick={() => void act('reset')}>Reset synthetic case</Button></ModalFooter></Modal>}</ModalTransition>
   </main>;
 }
 

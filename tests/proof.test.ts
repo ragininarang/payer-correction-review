@@ -10,7 +10,14 @@ describe('revisioned proof of correction', () => {
     expect(proof.correctedLineCount).toBe(11);
     expect(proof.unresolvedCents).toBe(10_000);
     expect(proof.status).toBe('incomplete');
-    expect(proof.obligations.find((item) => item.lineId === 'L12')?.status).toBe('missing');
+    const missing = proof.obligations.find((item) => item.lineId === 'L12');
+    expect(missing?.status).toBe('missing');
+    expect(missing).toMatchObject({
+      claimId: 'CLM-104726',
+      serviceLineNumber: 2,
+      procedureCode: '80053',
+      serviceDate: '2026-10-15',
+    });
   });
 
   it('can become eligible only after the final replacement and completed challenge search', () => {

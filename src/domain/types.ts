@@ -3,6 +3,9 @@ export type Cents = number;
 
 export interface InventoryLine {
   lineId: string;
+  claimId: string;
+  serviceLineNumber: number;
+  procedureCode: string;
   serviceDate: IsoDate;
   expectedNetCents: Cents;
   inventorySourceId: string;
@@ -52,6 +55,10 @@ export type LineStatus = 'corrected' | 'missing' | 'amount-mismatch' | 'ambiguou
 
 export interface LineObligation {
   lineId: string;
+  claimId: string;
+  serviceLineNumber: number;
+  procedureCode: string;
+  serviceDate: IsoDate;
   status: LineStatus;
   expectedNetCents: Cents;
   observedNetCents: Cents | null;

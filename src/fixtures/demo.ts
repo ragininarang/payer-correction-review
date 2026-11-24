@@ -2,6 +2,9 @@ import type { CounterexampleProposal, ProofInput } from '../domain/types';
 
 const inventory = Array.from({ length: 13 }, (_, index) => ({
   lineId: `L${String(index + 1).padStart(2, '0')}`,
+  claimId: `CLM-${104721 + Math.floor(index / 2)}`,
+  serviceLineNumber: (index % 2) + 1,
+  procedureCode: ['99213', '93000', '36415', '80053'][index % 4]!,
   serviceDate: index === 12 ? '2026-09-30' : '2026-10-15',
   expectedNetCents: 10_000,
   inventorySourceId: 'submitted-claims-v1',

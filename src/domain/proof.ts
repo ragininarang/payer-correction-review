@@ -164,6 +164,10 @@ export function buildProof(
       : 'Observed adjudicated net differs from approved expectation.';
     return {
       lineId: line.lineId,
+      claimId: line.claimId,
+      serviceLineNumber: line.serviceLineNumber,
+      procedureCode: line.procedureCode,
+      serviceDate: line.serviceDate,
       status,
       expectedNetCents: line.expectedNetCents,
       observedNetCents: ambiguous ? null : observed,
