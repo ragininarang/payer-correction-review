@@ -10,7 +10,7 @@ modules:
     - key: proof-resolver
       handler: forge/index.handler
     - key: sql-migration
-      handler: forge/index.runMigration
+      handler: forge/index.runRecovery
   scheduledTrigger:
     - key: sql-schema-check
       function: sql-migration

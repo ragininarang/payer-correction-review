@@ -19,6 +19,13 @@ describe('workflow safety policy', () => {
     expect(can('operator', 'manage-roles')).toBe(true);
   });
 
+  it('allows payer follow-up only for workflow participants', () => {
+    expect(can('viewer', 'record-follow-up')).toBe(false);
+    expect(can('operator', 'record-follow-up')).toBe(false);
+    expect(can('analyst', 'record-follow-up')).toBe(true);
+    expect(can('supervisor', 'record-follow-up')).toBe(true);
+  });
+
   it('rejects a stale displayed revision', () => {
     expect(() => requireExpectedRevision(2, 1)).toThrow(/changed after it was displayed/i);
     expect(() => requireExpectedRevision(2, 2)).not.toThrow();

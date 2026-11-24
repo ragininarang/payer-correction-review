@@ -18,7 +18,7 @@ This directory is the **canonical planning authority** for the product. Same-nam
 
 ## Current build
 
-The repository now contains a strict TypeScript proof engine, two synthetic scenarios, a React case workspace, a Forge Jira/JSM issue panel resolver, Forge SQL persistence, and automated tests. Run the complete local check with `./scripts/use-local-tools.sh npm run check`.
+The repository now contains a strict TypeScript proof engine, two synthetic scenarios, a React case workspace, a Forge Jira/JSM issue panel resolver, and an append-only Forge SQL foundation for source events, evidence versions, service-line results, payer follow-up, audit history, stage runs, and Jira effects. Run the complete local check with `./scripts/use-local-tools.sh npm run check`.
 
 The current prototype is not release-ready: Phase 1 of the implementation plan must first bind approval to the displayed revision/hash and enforce command authorization for every mutation.
 - [Solo delivery roadmap](ROADMAP.md)

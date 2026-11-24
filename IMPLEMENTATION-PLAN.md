@@ -1,6 +1,6 @@
 # Payer Correction Review — build implementation plan
 
-**Status:** ready-to-execute plan; implementation has not been authorized by this document. Follow [binding decisions](DECISIONS.md), [requirements](PRD.md), [system design](SYSTEM-DESIGN.md), and [evaluation plan](EVALUATION-PLAN.md). Work does not advance past a gate until its evidence is recorded.
+**Status:** implementation in progress. The local Phase 1 authorization/approval controls and Phase 2 append-only ledger foundation are implemented; deployed Forge SQL migration, recovery and reload tests remain gate evidence. Follow [binding decisions](DECISIONS.md), [requirements](PRD.md), [system design](SYSTEM-DESIGN.md), and [evaluation plan](EVALUATION-PLAN.md). Work does not advance past a gate until its evidence is recorded.
 
 ## MVP definition
 

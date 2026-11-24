@@ -28,8 +28,30 @@ interface CaseView {
   actorRole: AppRole;
   mode: 'local' | 'forge';
 }
-interface WorkspaceResponse { case: CaseView | null; actorRole: AppRole }
-interface FollowUp { outcome: string; nextReviewDate: string; note: string; count: number }
+interface FollowUp {
+  followUpId: string;
+  revision: number;
+  outcome: string;
+  nextReviewDate: string;
+  note: string;
+  lineIds: string[];
+  actorId: string;
+  occurredAt: string;
+}
+interface HistoryEvent {
+  eventId: string;
+  revision: number;
+  eventType: string;
+  actorId: string;
+  details: Record<string, unknown>;
+  occurredAt: string;
+}
+interface WorkspaceResponse {
+  case: CaseView | null;
+  actorRole: AppRole;
+  followUps?: FollowUp[];
+  history?: HistoryEvent[];
+}
 
 function proofFor(step: Step): CorrectionProof {
   const input = step === 'missing' ? baseInput : step === 'corrected' ? withFinalReplacement()
@@ -81,6 +103,13 @@ function lineStatus(status: LineObligation['status']): string {
 function lineAppearance(status: LineObligation['status']): 'success' | 'danger' | 'warning' {
   return status === 'corrected' ? 'success' : status === 'ambiguous' ? 'danger' : 'warning';
 }
+function followUpLabel(value: string): string {
+  return sentence(value === 'additional-information-requested' ? 'additional information requested'
+    : value === 'correction-promised' ? 'correction promised'
+      : value === 'payer-disputes-correction' ? 'payer disputes correction'
+        : value === 'payer-researching' ? 'payer researching'
+          : value === 'no-response' ? 'no response' : 'closed without pursuit');
+}
 
 function SourceList({ step }: { step: Step }) {
   return <div className="source-list">
@@ -92,14 +121,30 @@ function SourceList({ step }: { step: Step }) {
   </div>;
 }
 
-function ActivityTimeline({ view, followUp }: { view: CaseView; followUp: FollowUp | null }) {
+function ActivityTimeline({ view, followUp, history }: { view: CaseView; followUp: FollowUp | null; history: HistoryEvent[] }) {
+  if (history.length > 0) {
+    return <ol className="timeline">{history.map((item) => {
+      const title = item.eventType === 'case-initialized' ? 'Correction review started'
+        : item.eventType === 'evidence-revision-created' ? 'New evidence created an updated result'
+          : item.eventType === 'payer-follow-up-recorded' ? 'Payer follow-up recorded'
+            : item.eventType === 'proof-approved' ? 'Closure approved'
+              : item.eventType === 'case-reset' ? 'Synthetic case reset'
+                : item.eventType === 'role-mapped' ? 'App role changed' : sentence(item.eventType);
+      const detail = item.eventType === 'payer-follow-up-recorded'
+        ? `${followUpLabel(String(item.details.outcome ?? ''))} · Financial result unchanged`
+        : item.eventType === 'evidence-revision-created'
+          ? `Evidence version ${item.revision} · ${sentence(String(item.details.step ?? 'updated'))}`
+          : `Evidence version ${item.revision}`;
+      return <li key={item.eventId}><span className="timeline-dot" /><div><strong>{title}</strong><p>{detail}</p><small>{new Date(item.occurredAt).toLocaleString()}</small></div></li>;
+    })}</ol>;
+  }
   const reversed = view.proof.obligations.find((item) => item.lineId === 'L07');
   const items = [
     ['Submitted claims list accepted', '13 service lines available; inventory coverage confirmed', 'Automated validation · Evidence version 1'],
     ['Inclusion criteria confirmed', 'Service dates Oct 1–31 · 12 service lines included', 'Billing supervisor · Nov 22, 2026'],
     ['Payment activity checked', `${view.proof.correctedLineCount} of ${view.proof.expectedLineCount} included service lines currently match`, `Automated review · Evidence version ${view.proof.revision}`],
   ];
-  if (followUp) items.push(['Payer follow-up recorded', `${followUp.outcome} · ${followUp.count} selected service lines`, `Provider relations · Next review ${followUp.nextReviewDate}`]);
+  if (followUp) items.push(['Payer follow-up recorded', `${followUpLabel(followUp.outcome)} · ${followUp.lineIds.length} selected service line${followUp.lineIds.length === 1 ? '' : 's'}`, `Provider relations · Next review ${followUp.nextReviewDate}`]);
   if (view.approval.revision) items.push([view.approval.status === 'invalidated' ? 'Earlier closure approval invalidated' : 'Closure approved', view.approval.status === 'invalidated' ? 'New payment activity changed the result' : `Evidence version ${view.approval.revision} was approved`, 'Billing supervisor · Audit history retained']);
   if (view.step === 'reversed' && reversed) items.push(['Late reversal reopened the review', `${lineName(reversed)} no longer matches the expected payment`, 'Automated review · Evidence version 3']);
   if (view.step === 'challenged') items.push(['Potential inclusion issue needs review', 'A service line outside the date range may be covered by another payer notice', 'Automated review · Human decision required']);
@@ -124,14 +169,15 @@ function App() {
   const [resetOpen, setResetOpen] = useState(false);
   const [demoOpen, setDemoOpen] = useState(false);
   const [technicalOpen, setTechnicalOpen] = useState(false);
-  const [followUp, setFollowUp] = useState<FollowUp | null>(null);
+  const [followUps, setFollowUps] = useState<FollowUp[]>([]);
+  const [history, setHistory] = useState<HistoryEvent[]>([]);
 
   useEffect(() => {
     if (!forgeMode) return;
     setBusy(true);
     callForge<WorkspaceResponse>('getCase').then((result) => {
       if (!isWorkspaceResponse(result)) throw new Error('The app returned an invalid workspace response.');
-      if (result.case) { setView({ ...result.case, mode: 'forge' }); setHasCase(true); }
+      if (result.case) { setView({ ...result.case, mode: 'forge' }); setHasCase(true); setFollowUps(result.followUps ?? []); setHistory(result.history ?? []); }
       else { setView((current) => ({ ...current, actorRole: result.actorRole, mode: 'forge' })); setHasCase(false); }
     }).catch((error: unknown) => showMessage(error instanceof Error ? error.message : 'Unable to load this correction review.', 'danger')).finally(() => setBusy(false));
   }, [forgeMode]);
@@ -140,7 +186,7 @@ function App() {
   async function act(action: Action) {
     setMessage('');
     if (!forgeMode) {
-      if (action === 'initialize' || action === 'reset') { setView(localCase('missing', view.approval)); setHasCase(true); setSelectedLineId('L12'); setSelectedLineIds(new Set()); showMessage(action === 'reset' ? 'The synthetic case was reset.' : 'Correction review started.', 'success'); }
+      if (action === 'initialize' || action === 'reset') { setView(localCase('missing', view.approval)); setHasCase(true); setSelectedLineId('L12'); setSelectedLineIds(new Set()); if (action === 'initialize') setFollowUps([]); showMessage(action === 'reset' ? 'The synthetic case was reset. Earlier history remains available.' : 'Correction review started.', 'success'); }
       if (action === 'addCorrection') { setView(localCase('corrected', view.approval)); setSelectedLineId(null); showMessage('Replacement payment activity was accepted and checked.', 'success'); }
       if (action === 'approve' && view.proof.status === 'eligible') { setView({ ...view, approval: { status: 'approved', revision: view.proof.revision, proofHash: view.proof.inputHash }, projectionStatus: 'pending' }); showMessage('Closure approved. The Jira update is pending.', 'success'); }
       if (action === 'addReversal') { setView(localCase('reversed', view.approval)); setSelectedLineId('L07'); showMessage('New reversal activity reopened the review.', 'information'); }
@@ -155,6 +201,14 @@ function App() {
       const result = await callForge<CaseView>(action, payload);
       if (!isCaseView(result)) throw new Error('The app returned an invalid case response.');
       setView({ ...result, mode: 'forge' }); setHasCase(true); setApprovalOpen(false); setEvidenceOpen(false); setResetOpen(false);
+      try {
+        const workspace = await callForge<WorkspaceResponse>('getCase');
+        setFollowUps(workspace.followUps ?? []);
+        setHistory(workspace.history ?? []);
+      } catch {
+        showMessage('The update was saved, but recent history could not be reloaded. Refresh to try again.', 'information');
+        return;
+      }
       showMessage(action === 'approve' ? 'Closure approved. The Jira update will be tracked separately.' : 'The correction review was updated.', 'success');
     } catch (error: unknown) { showMessage(error instanceof Error ? error.message : 'The action failed. No financial result was changed.', 'danger'); }
     finally { setBusy(false); }
@@ -185,12 +239,34 @@ function App() {
     if (!selectedLineIds.size) { showMessage('Select at least one service line before preparing payer follow-up.', 'danger'); return; }
     setSelectedTab(3); showMessage(`${selectedLineIds.size} service line${selectedLineIds.size === 1 ? '' : 's'} added to payer follow-up.`);
   }
-  function saveFollowUp(event: FormEvent<HTMLFormElement>) {
+  async function saveFollowUp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const data = new FormData(event.currentTarget);
-    const item = { outcome: String(data.get('outcome') || ''), nextReviewDate: String(data.get('nextReviewDate') || ''), note: String(data.get('note') || ''), count: selectedLineIds.size };
-    if (!item.outcome || !item.nextReviewDate) { showMessage('Choose an outcome and next review date.', 'danger'); return; }
-    setFollowUp(item); showMessage('Payer follow-up was recorded. The financial result did not change.', 'success');
+    const outcome = String(data.get('outcome') || '');
+    const nextReviewDate = String(data.get('nextReviewDate') || '');
+    const note = String(data.get('note') || '');
+    if (!outcome || !nextReviewDate) { showMessage('Choose an outcome and next review date.', 'danger'); return; }
+    if (!forgeMode) {
+      setFollowUps((current) => [{ followUpId: crypto.randomUUID(), revision: view.proof.revision, outcome, nextReviewDate, note, lineIds: [...selectedLineIds], actorId: 'local-supervisor', occurredAt: new Date().toISOString() }, ...current]);
+      showMessage('Payer follow-up was recorded. The financial result did not change.', 'success'); return;
+    }
+    setBusy(true);
+    try {
+      const saved = await callForge<FollowUp>('recordFollowUp', { expectedRevision: view.proof.revision, outcome, nextReviewDate, note, lineIds: [...selectedLineIds] });
+      setFollowUps((current) => [saved, ...current]);
+      setHistory((current) => [...current, {
+        eventId: `followup:${saved.followUpId}`,
+        revision: saved.revision,
+        eventType: 'payer-follow-up-recorded',
+        actorId: saved.actorId,
+        details: { outcome: saved.outcome, lineIds: saved.lineIds, financialResultChanged: false },
+        occurredAt: saved.occurredAt,
+      }]);
+      showMessage('Payer follow-up was recorded. The financial result did not change.', 'success');
+    } catch (error: unknown) { showMessage(error instanceof Error ? error.message : 'Payer follow-up could not be saved.', 'danger'); }
+    finally { setBusy(false); }
   }
+
+  const latestFollowUp = followUps[0] ?? null;
 
   if (!hasCase) return <main className="empty-shell"><div className="product-mark">PCR</div><h1>No correction review yet</h1><p>Start a review for this Jira work item using synthetic claims and payment activity. No payer will be contacted.</p><Button appearance="primary" isDisabled={busy || !can(view.actorRole, 'initialize')} onClick={() => void act('initialize')}>Start correction review</Button></main>;
 
@@ -211,15 +287,15 @@ function App() {
 
       <TabPanel><div className="tab-content split-page"><section className="main-column"><div className="section-heading"><div><h2>Included claims and evidence</h2><p>See why claims are included and which documents support the review</p></div><Button onClick={() => setEvidenceOpen(true)}>Add evidence</Button></div><SourceList step={view.step} /></section><aside className="context-column"><section><h2>Confirmed inclusion criteria</h2><dl><div><dt>Payer</dt><dd>Payer Demo</dd></div><div><dt>Service dates</dt><dd>Oct 1–31, 2026</dd></div><div><dt>Starting list</dt><dd>Submitted claims</dd></div><div><dt>Expected payment</dt><dd>$100.00 per service line</dd></div><div><dt>Confirmed by</dt><dd>Billing supervisor</dd></div></dl><Button appearance="subtle" onClick={() => setCriteriaOpen(true)}>View criteria and cited notice</Button></section><SectionMessage appearance="information" title="Payment files do not decide which claims are included"><p>The claims list and confirmed payer notice define the included service lines before payment activity is checked.</p></SectionMessage></aside></div></TabPanel>
 
-      <TabPanel><div className="tab-content follow-up-page"><div className="section-heading"><div><h2>Payer follow-up</h2><p>Record contact about unresolved items. A note never changes the financial result.</p></div></div>{!selectedLineIds.size ? <div className="empty-state"><h3>No claims selected</h3><p>Select unresolved service lines from Claims before preparing payer follow-up.</p><Button appearance="primary" onClick={() => { setFilter('attention'); setSelectedTab(1); }}>Choose claims</Button></div> : <div className="follow-up-grid"><section className="selected-claims"><h3>Selected for follow-up</h3>{view.proof.obligations.filter((item) => selectedLineIds.has(item.lineId)).map((item) => <article key={item.lineId}><div><strong>{lineName(item)}</strong><span>{dateLabel(item.serviceDate)} · Procedure {item.procedureCode}</span></div><span>{currency(Math.max(0, item.expectedNetCents - (item.observedNetCents ?? 0)))} unresolved</span></article>)}</section><form className="follow-up-form" onSubmit={saveFollowUp}><h3>Record payer contact</h3><label>Outcome<select name="outcome" defaultValue={followUp?.outcome ?? ''}><option value="" disabled>Choose an outcome</option><option>Payer researching</option><option>Additional information requested</option><option>Correction promised</option><option>Payer disputes correction</option><option>No response</option></select></label><label>Next review date<input name="nextReviewDate" type="date" defaultValue={followUp?.nextReviewDate ?? '2026-11-30'} /></label><label>Internal note<textarea name="note" rows={4} defaultValue={followUp?.note ?? ''} placeholder="What should the next person know?" /></label><SectionMessage appearance="information"><p>Saving this contact does not mark claims as paid. Add new payment evidence separately.</p></SectionMessage><Button appearance="primary" type="submit">Save payer follow-up</Button></form></div>}</div></TabPanel>
+      <TabPanel><div className="tab-content follow-up-page"><div className="section-heading"><div><h2>Payer follow-up</h2><p>Record contact about unresolved items. A note never changes the financial result.</p></div></div>{!selectedLineIds.size ? <div className="empty-state"><h3>No claims selected</h3><p>Select unresolved service lines from Claims before preparing payer follow-up.</p>{latestFollowUp && <p>Most recent: {followUpLabel(latestFollowUp.outcome)} · Next review {latestFollowUp.nextReviewDate}</p>}<Button appearance="primary" onClick={() => { setFilter('attention'); setSelectedTab(1); }}>Choose claims</Button></div> : <div className="follow-up-grid"><section className="selected-claims"><h3>Selected for follow-up</h3>{view.proof.obligations.filter((item) => selectedLineIds.has(item.lineId)).map((item) => <article key={item.lineId}><div><strong>{lineName(item)}</strong><span>{dateLabel(item.serviceDate)} · Procedure {item.procedureCode}</span></div><span>{currency(Math.max(0, item.expectedNetCents - (item.observedNetCents ?? 0)))} unresolved</span></article>)}</section><form className="follow-up-form" onSubmit={(event) => void saveFollowUp(event)}><h3>Record payer contact</h3><label>Outcome<select name="outcome" defaultValue={latestFollowUp?.outcome ?? ''}><option value="" disabled>Choose an outcome</option><option value="payer-researching">Payer researching</option><option value="additional-information-requested">Additional information requested</option><option value="correction-promised">Correction promised</option><option value="payer-disputes-correction">Payer disputes correction</option><option value="no-response">No response</option><option value="closed-without-pursuit">Stop pursuing internally</option></select></label><label>Next review date<input name="nextReviewDate" type="date" defaultValue={latestFollowUp?.nextReviewDate ?? '2026-11-30'} /></label><label>Internal note<textarea name="note" rows={4} defaultValue={latestFollowUp?.note ?? ''} placeholder="What should the next person know?" /></label><SectionMessage appearance="information"><p>Saving this contact does not mark claims as paid. “Stop pursuing” also leaves the amount financially unresolved.</p></SectionMessage><Button appearance="primary" type="submit" isDisabled={busy}>Save payer follow-up</Button></form></div>}</div></TabPanel>
 
-      <TabPanel><div className="tab-content activity-page"><div className="section-heading"><div><h2>Review history</h2><p>Who or what changed the review, in order</p></div></div><ActivityTimeline view={view} followUp={followUp} /><section className="technical-disclosure"><button className="disclosure-button" onClick={() => setTechnicalOpen(!technicalOpen)} aria-expanded={technicalOpen}><span>Technical and automation details</span><span>{technicalOpen ? 'Hide' : 'Show'}</span></button>{technicalOpen && <div className="technical-body"><dl><div><dt>Internal case</dt><dd>{view.proof.caseId}</dd></div><div><dt>Evidence version</dt><dd>{view.proof.revision}</dd></div><div><dt>Technical identifier</dt><dd className="hash">{view.proof.inputHash}</dd></div><div><dt>Automated run</dt><dd>No failures</dd></div></dl><p className="subtle-copy">Operators use this area to diagnose failed automated runs. It cannot change the financial result.</p></div>}</section><div className="demo-controls"><button className="demo-toggle" onClick={() => setDemoOpen(!demoOpen)}><span>Demo scenario controls</span><small>{demoOpen ? 'Hide' : 'Show'} synthetic state changes</small></button>{demoOpen && <div className="demo-actions"><Button onClick={() => void act('addCorrection')}>Import final correction</Button><Button onClick={() => void act('addReversal')}>Import late reversal</Button><Button onClick={() => void act('challenge')}>Find inclusion conflict</Button><Button appearance="danger" onClick={() => setResetOpen(true)}>Reset synthetic case</Button></div>}</div></div></TabPanel>
+      <TabPanel><div className="tab-content activity-page"><div className="section-heading"><div><h2>Review history</h2><p>Who or what changed the review, in order</p></div></div><ActivityTimeline view={view} followUp={latestFollowUp} history={history} /><section className="technical-disclosure"><button className="disclosure-button" onClick={() => setTechnicalOpen(!technicalOpen)} aria-expanded={technicalOpen}><span>Technical and automation details</span><span>{technicalOpen ? 'Hide' : 'Show'}</span></button>{technicalOpen && <div className="technical-body"><dl><div><dt>Internal case</dt><dd>{view.proof.caseId}</dd></div><div><dt>Evidence version</dt><dd>{view.proof.revision}</dd></div><div><dt>Technical identifier</dt><dd className="hash">{view.proof.inputHash}</dd></div><div><dt>Automated run</dt><dd>No failures</dd></div></dl><p className="subtle-copy">Operators use this area to diagnose failed automated runs. It cannot change the financial result.</p></div>}</section><div className="demo-controls"><button className="demo-toggle" onClick={() => setDemoOpen(!demoOpen)}><span>Demo scenario controls</span><small>{demoOpen ? 'Hide' : 'Show'} synthetic state changes</small></button>{demoOpen && <div className="demo-actions"><Button onClick={() => void act('addCorrection')}>Import final correction</Button><Button onClick={() => void act('addReversal')}>Import late reversal</Button><Button onClick={() => void act('challenge')}>Find inclusion conflict</Button><Button appearance="danger" onClick={() => setResetOpen(true)}>Reset synthetic case</Button></div>}</div></div></TabPanel>
     </Tabs>
 
     <ModalTransition>{evidenceOpen && <Modal onClose={() => setEvidenceOpen(false)}><ModalHeader><ModalTitle>Add payment evidence</ModalTitle></ModalHeader><ModalBody><p>The app checks access, identity, format, duplicates, and conflicts before updating the result.</p><div className="source-choice selected"><div><strong>Replacement payment activity</strong><span>Synthetic remittance file · 12 adjustments</span></div><Lozenge appearance="success">Ready</Lozenge></div><SectionMessage appearance="information" title="Required documents must be valid first"><p>This creates a new evidence version. If the result changes, any current closure approval is invalidated.</p></SectionMessage></ModalBody><ModalFooter><Button appearance="subtle" onClick={() => setEvidenceOpen(false)}>Cancel</Button><Button appearance="primary" isDisabled={busy || view.step !== 'missing'} onClick={() => void act('addCorrection')}>{view.step === 'missing' ? 'Add and check evidence' : 'Evidence already added'}</Button></ModalFooter></Modal>}</ModalTransition>
     <ModalTransition>{criteriaOpen && <Modal onClose={() => setCriteriaOpen(false)}><ModalHeader><ModalTitle>Inclusion criteria</ModalTitle></ModalHeader><ModalBody><p>These criteria decide which submitted service lines should have received the payer correction.</p><dl className="modal-summary"><div><dt>Payer</dt><dd>Payer Demo</dd></div><div><dt>Service dates</dt><dd>Oct 1–31, 2026</dd></div><div><dt>Included</dt><dd>12 service lines</dd></div><div><dt>Excluded</dt><dd>1 service line</dd></div></dl><div className="quoted-source"><strong>Cited payer notice</strong><p>“Professional claims with dates of service from October 1 through October 31, 2026 are included in this correction.”</p></div><p className="subtle-copy">Changing these criteria must show the population difference and create a new evidence version.</p></ModalBody><ModalFooter><Button appearance="primary" onClick={() => setCriteriaOpen(false)}>Done</Button></ModalFooter></Modal>}</ModalTransition>
     <ModalTransition>{approvalOpen && <Modal onClose={() => setApprovalOpen(false)}><ModalHeader><ModalTitle>Review for closure</ModalTitle></ModalHeader><ModalBody><p>You are approving the financial result for this exact evidence version. New evidence will reopen the review if it changes the result.</p><dl className="modal-summary"><div><dt>Included service lines</dt><dd>{view.proof.expectedLineCount}</dd></div><div><dt>Corrected as expected</dt><dd>{view.proof.correctedLineCount}</dd></div><div><dt>Amount still unresolved</dt><dd>{currency(view.proof.unresolvedCents)}</dd></div><div><dt>Evidence version</dt><dd>{view.proof.revision}</dd></div></dl><details><summary>Technical identifier</summary><p className="hash">{view.proof.inputHash}</p></details></ModalBody><ModalFooter><Button appearance="subtle" onClick={() => setApprovalOpen(false)}>Cancel</Button><Button appearance="primary" isDisabled={busy} onClick={() => void act('approve')}>Approve closure</Button></ModalFooter></Modal>}</ModalTransition>
-    <ModalTransition>{resetOpen && <Modal onClose={() => setResetOpen(false)}><ModalHeader><ModalTitle>Reset this synthetic case?</ModalTitle></ModalHeader><ModalBody><SectionMessage appearance="warning" title="This clears the current demo state"><p>Claims, evidence, selections, and follow-up entries return to the starting scenario. Production audit history would remain.</p></SectionMessage></ModalBody><ModalFooter><Button appearance="subtle" onClick={() => setResetOpen(false)}>Cancel</Button><Button appearance="danger" onClick={() => void act('reset')}>Reset synthetic case</Button></ModalFooter></Modal>}</ModalTransition>
+    <ModalTransition>{resetOpen && <Modal onClose={() => setResetOpen(false)}><ModalHeader><ModalTitle>Reset this synthetic case?</ModalTitle></ModalHeader><ModalBody><SectionMessage appearance="warning" title="This starts a new demo evidence version"><p>The current result and selections return to the starting scenario. Earlier evidence, follow-up, approvals, and audit history remain inspectable.</p></SectionMessage></ModalBody><ModalFooter><Button appearance="subtle" onClick={() => setResetOpen(false)}>Cancel</Button><Button appearance="danger" onClick={() => void act('reset')}>Reset synthetic case</Button></ModalFooter></Modal>}</ModalTransition>
   </main>;
 }
 

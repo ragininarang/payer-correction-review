@@ -5,6 +5,7 @@ export type WorkflowCommand =
   | 'read'
   | 'initialize'
   | 'record-evidence'
+  | 'record-follow-up'
   | 'challenge'
   | 'approve'
   | 'reset'
@@ -15,8 +16,8 @@ export type ProjectionStatus = 'not-requested' | 'pending' | 'synced' | 'failed'
 
 const grants: Record<AppRole, readonly WorkflowCommand[]> = {
   viewer: ['read'],
-  analyst: ['read', 'initialize', 'record-evidence', 'challenge'],
-  supervisor: ['read', 'initialize', 'record-evidence', 'challenge', 'approve', 'reset'],
+  analyst: ['read', 'initialize', 'record-evidence', 'record-follow-up', 'challenge'],
+  supervisor: ['read', 'initialize', 'record-evidence', 'record-follow-up', 'challenge', 'approve', 'reset'],
   operator: ['read', 'initialize', 'record-evidence', 'challenge', 'reset', 'manage-roles'],
 };
 

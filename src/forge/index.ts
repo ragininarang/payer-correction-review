@@ -5,6 +5,7 @@ import { migrationRunner, sql } from '@forge/sql';
 import type { UpdateQueryResponse } from '@forge/sql';
 import { buildProof } from '../domain/proof';
 import type { CorrectionProof, ProofInput } from '../domain/types';
+import { classifyEvidence, contentHash, validateFollowUp, type FollowUpOutcome } from '../domain/ledger';
 import {
   invalidatedStates,
   requireCommand,
@@ -34,6 +35,34 @@ interface CaseRow {
 }
 
 interface RoleRow { app_role: AppRole }
+interface EvidenceRow {
+  event_key: string;
+  event_id: string;
+  content_hash: string;
+  status: 'pending' | 'applied' | 'quarantined';
+  prior_revision: number;
+  resulting_revision: number | null;
+  desired_step: Step;
+}
+interface PendingEvidenceRow extends EvidenceRow { issue_id: string }
+interface FollowUpRow {
+  followup_id: string;
+  revision: number;
+  outcome: FollowUpOutcome;
+  next_review_date: string;
+  note: string;
+  line_ids_json: string;
+  actor_id: string;
+  occurred_at: string;
+}
+interface AuditRow {
+  audit_event_id: string;
+  revision: number;
+  event_type: string;
+  actor_id: string;
+  details_json: string;
+  occurred_at: string;
+}
 
 interface CaseView {
   step: Step;
@@ -42,6 +71,26 @@ interface CaseView {
   projectionStatus: ProjectionStatus;
   actorRole: AppRole;
   mode: 'forge';
+}
+
+interface FollowUpView {
+  followUpId: string;
+  revision: number;
+  outcome: FollowUpOutcome;
+  nextReviewDate: string;
+  note: string;
+  lineIds: string[];
+  actorId: string;
+  occurredAt: string;
+}
+
+interface HistoryView {
+  eventId: string;
+  revision: number;
+  eventType: string;
+  actorId: string;
+  details: Record<string, unknown>;
+  occurredAt: string;
 }
 
 const createLegacyCases = `CREATE TABLE IF NOT EXISTS correction_cases (
@@ -88,15 +137,106 @@ const createAuditEvents = `CREATE TABLE IF NOT EXISTS correction_audit_events (
   details_json MEDIUMTEXT NOT NULL,
   occurred_at VARCHAR(40) NOT NULL
 )`;
+const createSourceEvents = `CREATE TABLE IF NOT EXISTS correction_source_events (
+  event_key VARCHAR(128) PRIMARY KEY,
+  issue_id VARCHAR(128) NOT NULL,
+  event_id VARCHAR(128) NOT NULL,
+  content_hash VARCHAR(64) NOT NULL,
+  source_type VARCHAR(40) NOT NULL,
+  source_name VARCHAR(255) NOT NULL,
+  desired_step VARCHAR(20) NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  prior_revision INT NOT NULL,
+  resulting_revision INT NULL,
+  registered_by VARCHAR(128) NOT NULL,
+  payload_json MEDIUMTEXT NOT NULL,
+  registered_at VARCHAR(40) NOT NULL,
+  UNIQUE KEY correction_source_event_identity (issue_id, event_id)
+)`;
+const createProofRevisions = `CREATE TABLE IF NOT EXISTS correction_proof_revisions (
+  proof_revision_id VARCHAR(180) PRIMARY KEY,
+  issue_id VARCHAR(128) NOT NULL,
+  revision INT NOT NULL,
+  proof_hash VARCHAR(128) NOT NULL,
+  proof_status VARCHAR(20) NOT NULL,
+  proof_json MEDIUMTEXT NOT NULL,
+  created_at VARCHAR(40) NOT NULL,
+  UNIQUE KEY correction_proof_identity (issue_id, revision)
+)`;
+const createLineResults = `CREATE TABLE IF NOT EXISTS correction_line_results (
+  result_id VARCHAR(220) PRIMARY KEY,
+  issue_id VARCHAR(128) NOT NULL,
+  revision INT NOT NULL,
+  line_id VARCHAR(128) NOT NULL,
+  claim_id VARCHAR(128) NOT NULL,
+  service_line_number INT NOT NULL,
+  status VARCHAR(30) NOT NULL,
+  expected_net_cents BIGINT NOT NULL,
+  observed_net_cents BIGINT NULL,
+  result_json MEDIUMTEXT NOT NULL
+)`;
+const createPayerFollowups = `CREATE TABLE IF NOT EXISTS correction_payer_followups (
+  followup_id VARCHAR(64) PRIMARY KEY,
+  issue_id VARCHAR(128) NOT NULL,
+  revision INT NOT NULL,
+  outcome VARCHAR(50) NOT NULL,
+  next_review_date VARCHAR(10) NOT NULL,
+  note MEDIUMTEXT NOT NULL,
+  line_ids_json MEDIUMTEXT NOT NULL,
+  actor_id VARCHAR(128) NOT NULL,
+  occurred_at VARCHAR(40) NOT NULL
+)`;
+const createStageRuns = `CREATE TABLE IF NOT EXISTS correction_stage_runs (
+  stage_run_id VARCHAR(220) PRIMARY KEY,
+  issue_id VARCHAR(128) NOT NULL,
+  revision INT NOT NULL,
+  stage VARCHAR(40) NOT NULL,
+  status VARCHAR(30) NOT NULL,
+  attempt INT NOT NULL,
+  terminal_reason VARCHAR(50) NULL,
+  telemetry_json MEDIUMTEXT NOT NULL,
+  updated_at VARCHAR(40) NOT NULL
+)`;
+const createJiraEffects = `CREATE TABLE IF NOT EXISTS correction_jira_effects (
+  effect_id VARCHAR(220) PRIMARY KEY,
+  issue_id VARCHAR(128) NOT NULL,
+  revision INT NOT NULL,
+  effect_type VARCHAR(40) NOT NULL,
+  status VARCHAR(30) NOT NULL,
+  attempt INT NOT NULL,
+  details_json MEDIUMTEXT NOT NULL,
+  updated_at VARCHAR(40) NOT NULL
+)`;
 
 migrationRunner.enqueue('v001_correction_cases', createLegacyCases);
 migrationRunner.enqueue('v002_case_control', createCaseControl);
 migrationRunner.enqueue('v003_actor_roles', createRoles);
 migrationRunner.enqueue('v004_approval_history', createApprovalHistory);
 migrationRunner.enqueue('v005_audit_events', createAuditEvents);
+migrationRunner.enqueue('v006_source_events', createSourceEvents);
+migrationRunner.enqueue('v007_proof_revisions', createProofRevisions);
+migrationRunner.enqueue('v008_line_results', createLineResults);
+migrationRunner.enqueue('v009_payer_followups', createPayerFollowups);
+migrationRunner.enqueue('v010_stage_runs', createStageRuns);
+migrationRunner.enqueue('v011_jira_effects', createJiraEffects);
 
 export async function runMigration(): Promise<void> {
   await migrationRunner.run();
+}
+
+export async function runRecovery(): Promise<void> {
+  await runMigration();
+  const pending = await sql.prepare<PendingEvidenceRow>(`SELECT event_key, issue_id, event_id, content_hash,
+    status, prior_revision, resulting_revision, desired_step FROM correction_source_events
+    WHERE status = ? ORDER BY registered_at ASC LIMIT 50`).bindParams('pending').execute();
+  for (const event of pending.rows) {
+    const row = await readCase(event.issue_id);
+    if (!row || row.revision <= event.prior_revision || row.step !== event.desired_step) continue;
+    const proof = JSON.parse(row.proof_json) as CorrectionProof;
+    await persistProofRevision(event.issue_id, proof);
+    await sql.prepare('UPDATE correction_source_events SET status = ?, resulting_revision = ? WHERE event_key = ? AND status = ?')
+      .bindParams('applied', row.revision, event.event_key, 'pending').execute();
+  }
 }
 
 function issueIdFromContext(context: ResolverContext): string {
@@ -163,6 +303,108 @@ async function readCase(issueId: string): Promise<CaseRow | null> {
   return result.rows[0] ?? null;
 }
 
+function parseObject(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch { return {}; }
+}
+
+async function readEvidenceEvent(issueId: string, eventId: string): Promise<EvidenceRow | null> {
+  const result = await sql.prepare<EvidenceRow>(`SELECT event_key, event_id, content_hash, status,
+    prior_revision, resulting_revision, desired_step
+    FROM correction_source_events WHERE issue_id = ? AND event_id = ?`).bindParams(issueId, eventId).execute();
+  return result.rows[0] ?? null;
+}
+
+async function registerEvidenceEvent(
+  issueId: string,
+  eventId: string,
+  sourceType: string,
+  sourceName: string,
+  desiredStep: Step,
+  priorRevision: number,
+  actorId: string,
+  payload: Record<string, unknown>,
+): Promise<{ row: EvidenceRow; registration: 'new' | 'duplicate' }> {
+  const hash = contentHash(payload);
+  const existing = await readEvidenceEvent(issueId, eventId);
+  const classification = classifyEvidence(existing?.content_hash ?? null, hash);
+  if (classification === 'conflict') {
+    if (existing) await sql.prepare('UPDATE correction_source_events SET status = ? WHERE event_key = ?')
+      .bindParams('quarantined', existing.event_key).execute();
+    throw new Error('This evidence identity was already used for different content. The new file was quarantined for operator review.');
+  }
+  if (existing?.status === 'quarantined') {
+    throw new Error('This evidence identity is quarantined and cannot be used until an operator resolves the conflict.');
+  }
+  if (existing) return { row: existing, registration: 'duplicate' };
+
+  const eventKey = contentHash({ issueId, eventId });
+  await sql.prepare(`INSERT IGNORE INTO correction_source_events
+    (event_key, issue_id, event_id, content_hash, source_type, source_name, desired_step, status,
+     prior_revision, resulting_revision, registered_by, payload_json, registered_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`).bindParams(
+    eventKey, issueId, eventId, hash, sourceType, sourceName, desiredStep, 'pending', priorRevision,
+    actorId, JSON.stringify(payload), new Date().toISOString(),
+  ).execute();
+  const row = await readEvidenceEvent(issueId, eventId);
+  if (!row) throw new Error('Evidence registration could not be verified. No case result was changed.');
+  if (row.content_hash !== hash) {
+    await sql.prepare('UPDATE correction_source_events SET status = ? WHERE event_key = ?').bindParams('quarantined', row.event_key).execute();
+    throw new Error('This evidence identity was registered concurrently with different content. It was quarantined.');
+  }
+  return { row, registration: 'new' };
+}
+
+async function persistProofRevision(issueId: string, proof: CorrectionProof): Promise<void> {
+  const now = new Date().toISOString();
+  await sql.prepare(`INSERT IGNORE INTO correction_proof_revisions
+    (proof_revision_id, issue_id, revision, proof_hash, proof_status, proof_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`).bindParams(
+    `${issueId}:${proof.revision}`, issueId, proof.revision, proof.inputHash, proof.status, JSON.stringify(proof), now,
+  ).execute();
+  for (const item of proof.obligations) {
+    await sql.prepare(`INSERT IGNORE INTO correction_line_results
+      (result_id, issue_id, revision, line_id, claim_id, service_line_number, status,
+       expected_net_cents, observed_net_cents, result_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bindParams(
+      `${issueId}:${proof.revision}:${item.lineId}`, issueId, proof.revision, item.lineId, item.claimId,
+      item.serviceLineNumber, item.status, item.expectedNetCents, item.observedNetCents, JSON.stringify(item),
+    ).execute();
+  }
+}
+
+async function readFollowUps(issueId: string): Promise<FollowUpView[]> {
+  const result = await sql.prepare<FollowUpRow>(`SELECT followup_id, revision, outcome, next_review_date,
+    note, line_ids_json, actor_id, occurred_at FROM correction_payer_followups
+    WHERE issue_id = ? ORDER BY occurred_at DESC LIMIT 50`).bindParams(issueId).execute();
+  return result.rows.map((row) => ({
+    followUpId: row.followup_id,
+    revision: row.revision,
+    outcome: row.outcome,
+    nextReviewDate: row.next_review_date,
+    note: row.note,
+    lineIds: JSON.parse(row.line_ids_json) as string[],
+    actorId: row.actor_id,
+    occurredAt: row.occurred_at,
+  }));
+}
+
+async function readHistory(issueId: string): Promise<HistoryView[]> {
+  const result = await sql.prepare<AuditRow>(`SELECT audit_event_id, revision, event_type, actor_id,
+    details_json, occurred_at FROM correction_audit_events
+    WHERE issue_id = ? ORDER BY occurred_at ASC LIMIT 200`).bindParams(issueId).execute();
+  return result.rows.map((row) => ({
+    eventId: row.audit_event_id,
+    revision: row.revision,
+    eventType: row.event_type,
+    actorId: row.actor_id,
+    details: parseObject(row.details_json),
+    occurredAt: row.occurred_at,
+  }));
+}
+
 function view(row: CaseRow, role: AppRole): CaseView {
   const proof = JSON.parse(row.proof_json) as CorrectionProof;
   if (proof.revision !== row.revision || proof.caseId !== `JIRA-${row.issue_id}` || proof.inputHash !== row.proof_hash) {
@@ -212,11 +454,19 @@ async function updateStep(
   expectedRevision: unknown,
   actorId: string,
   role: AppRole,
+  evidence: { eventId: string; sourceType: string; sourceName: string; payload: Record<string, unknown> },
 ): Promise<CaseView> {
   const row = await readCase(issueId);
   if (!row) throw new Error('Initialize the synthetic case first.');
   requireExpectedRevision(row.revision, expectedRevision);
-  if (row.step === desired) return view(row, role);
+  const registered = await registerEvidenceEvent(
+    issueId, evidence.eventId, evidence.sourceType, evidence.sourceName, desired, row.revision, actorId, evidence.payload,
+  );
+  if (row.step === desired) {
+    await sql.prepare('UPDATE correction_source_events SET status = ?, resulting_revision = ? WHERE event_key = ? AND status = ?')
+      .bindParams('applied', row.revision, registered.row.event_key, 'pending').execute();
+    return view(row, role);
+  }
   if (!validPrior.includes(row.step)) throw new Error('This evidence step is not available from the current case state.');
 
   const nextRevision = row.revision + 1;
@@ -231,10 +481,20 @@ async function updateStep(
   ).execute();
   if (result.rows.affectedRows !== 1) throw new Error('Case changed while this action ran. Refresh and retry.');
 
+  await persistProofRevision(issueId, proof);
+  await sql.prepare('UPDATE correction_source_events SET status = ?, resulting_revision = ? WHERE event_key = ? AND status = ?')
+    .bindParams('applied', nextRevision, registered.row.event_key, 'pending').execute();
+
   if (wasApproved && row.approved_revision !== null && row.approved_hash) {
     await appendApprovalHistory(issueId, row.approved_revision, row.approved_hash, 'invalidated', actorId, `${desired} evidence created revision ${nextRevision}`);
   }
-  await appendAudit(issueId, nextRevision, 'evidence-revision-created', actorId, { priorStep: row.step, step: desired, priorRevision: row.revision });
+  await appendAudit(issueId, nextRevision, 'evidence-revision-created', actorId, {
+    priorStep: row.step,
+    step: desired,
+    priorRevision: row.revision,
+    sourceEventId: evidence.eventId,
+    duplicate: registered.registration === 'duplicate',
+  });
   const updated = await readCase(issueId);
   if (!updated) throw new Error('Updated case could not be reloaded.');
   return view(updated, role);
@@ -245,7 +505,12 @@ const resolver = new Resolver();
 resolver.define('getCase', async ({ context }) => {
   const actor = await authorize(context as ResolverContext, 'read');
   const row = await readCase(actor.issueId);
-  return { case: row ? view(row, actor.role) : null, actorRole: actor.role };
+  return {
+    case: row ? view(row, actor.role) : null,
+    actorRole: actor.role,
+    followUps: await readFollowUps(actor.issueId),
+    history: await readHistory(actor.issueId),
+  };
 });
 
 resolver.define('initialize', async ({ context }) => {
@@ -257,6 +522,19 @@ resolver.define('initialize', async ({ context }) => {
      projection_status, proof_hash, proof_json) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`).bindParams(
     actor.issueId, 1, 'missing', proof.status, 'unapproved', 'not-requested', proof.inputHash, JSON.stringify(proof),
   ).execute();
+  await persistProofRevision(actor.issueId, proof);
+  const baseline = await registerEvidenceEvent(
+    actor.issueId,
+    'synthetic-baseline-v1',
+    'synthetic-case',
+    'Submitted claims, payer notice, and initial payment activity',
+    'missing',
+    0,
+    actor.accountId,
+    { fixture: 'baseInput', inventoryLines: 13, replacementAdjustments: 11 },
+  );
+  await sql.prepare('UPDATE correction_source_events SET status = ?, resulting_revision = ? WHERE event_key = ?')
+    .bindParams('applied', 1, baseline.row.event_key).execute();
   await appendAudit(actor.issueId, 1, 'case-initialized', actor.accountId, { synthetic: true });
   const row = await readCase(actor.issueId);
   if (!row) throw new Error('Initialized case could not be reloaded.');
@@ -265,17 +543,72 @@ resolver.define('initialize', async ({ context }) => {
 
 resolver.define('addCorrection', async ({ payload, context }) => {
   const actor = await authorize(context as ResolverContext, 'record-evidence');
-  return updateStep(actor.issueId, 'corrected', ['missing'], payloadObject(payload).expectedRevision, actor.accountId, actor.role);
+  return updateStep(actor.issueId, 'corrected', ['missing'], payloadObject(payload).expectedRevision, actor.accountId, actor.role, {
+    eventId: 'synthetic-final-correction-v1',
+    sourceType: 'payment-activity',
+    sourceName: 'Final replacement payment activity',
+    payload: { fixture: 'final-replacement', lineId: 'L12', signedAmountCents: 10_000 },
+  });
 });
 
 resolver.define('addReversal', async ({ payload, context }) => {
   const actor = await authorize(context as ResolverContext, 'record-evidence');
-  return updateStep(actor.issueId, 'reversed', ['corrected'], payloadObject(payload).expectedRevision, actor.accountId, actor.role);
+  return updateStep(actor.issueId, 'reversed', ['corrected'], payloadObject(payload).expectedRevision, actor.accountId, actor.role, {
+    eventId: 'synthetic-late-reversal-v1',
+    sourceType: 'payment-activity',
+    sourceName: 'Late reversal payment activity',
+    payload: { fixture: 'late-reversal', lineId: 'L07', signedAmountCents: -10_000, reverses: 'replacement-L07' },
+  });
 });
 
 resolver.define('challenge', async ({ payload, context }) => {
   const actor = await authorize(context as ResolverContext, 'challenge');
-  return updateStep(actor.issueId, 'challenged', ['missing', 'corrected', 'reversed'], payloadObject(payload).expectedRevision, actor.accountId, actor.role);
+  return updateStep(actor.issueId, 'challenged', ['missing', 'corrected', 'reversed'], payloadObject(payload).expectedRevision, actor.accountId, actor.role, {
+    eventId: 'synthetic-payer-clarification-v1',
+    sourceType: 'payer-notice',
+    sourceName: 'Payer clarification notice',
+    payload: { fixture: 'conflicting-scope', effectiveFrom: '2026-09-30', effectiveThrough: '2026-10-31' },
+  });
+});
+
+resolver.define('recordFollowUp', async ({ payload, context }) => {
+  const actor = await authorize(context as ResolverContext, 'record-follow-up');
+  const row = await readCase(actor.issueId);
+  if (!row) throw new Error('Initialize the synthetic case first.');
+  const proof = view(row, actor.role).proof;
+  const raw = payloadObject(payload);
+  const input = validateFollowUp({
+    expectedRevision: raw.expectedRevision,
+    outcome: raw.outcome,
+    nextReviewDate: raw.nextReviewDate,
+    note: raw.note,
+    lineIds: raw.lineIds,
+  }, proof);
+  const followUpId = randomUUID();
+  const occurredAt = new Date().toISOString();
+  await sql.prepare(`INSERT INTO correction_payer_followups
+    (followup_id, issue_id, revision, outcome, next_review_date, note, line_ids_json, actor_id, occurred_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bindParams(
+    followUpId, actor.issueId, input.expectedRevision, input.outcome, input.nextReviewDate, input.note,
+    JSON.stringify(input.lineIds), actor.accountId, occurredAt,
+  ).execute();
+  await appendAudit(actor.issueId, input.expectedRevision, 'payer-follow-up-recorded', actor.accountId, {
+    followUpId,
+    outcome: input.outcome,
+    nextReviewDate: input.nextReviewDate,
+    lineIds: input.lineIds,
+    financialResultChanged: false,
+  });
+  return {
+    followUpId,
+    revision: input.expectedRevision,
+    outcome: input.outcome,
+    nextReviewDate: input.nextReviewDate,
+    note: input.note,
+    lineIds: input.lineIds,
+    actorId: actor.accountId,
+    occurredAt,
+  } satisfies FollowUpView;
 });
 
 resolver.define('approve', async ({ payload, context }) => {
@@ -293,6 +626,12 @@ resolver.define('approve', async ({ payload, context }) => {
     'approved', row.revision, proof.inputHash, 'pending', actor.issueId, row.revision, proof.inputHash, 'eligible',
   ).execute();
   if (result.rows.affectedRows !== 1) throw new Error('Approval is stale. Refresh the case before trying again.');
+  await sql.prepare(`INSERT IGNORE INTO correction_jira_effects
+    (effect_id, issue_id, revision, effect_type, status, attempt, details_json, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bindParams(
+    `${actor.issueId}:${row.revision}:approved`, actor.issueId, row.revision, 'project-approved-closure',
+    'pending', 0, JSON.stringify({ proofHash: proof.inputHash }), new Date().toISOString(),
+  ).execute();
   await appendApprovalHistory(actor.issueId, row.revision, proof.inputHash, 'approved', actor.accountId, 'Supervisor approved exact proof revision and fingerprint.');
   await appendAudit(actor.issueId, row.revision, 'proof-approved', actor.accountId, { proofHash: proof.inputHash });
   const updated = await readCase(actor.issueId);
@@ -319,6 +658,7 @@ resolver.define('reset', async ({ payload, context }) => {
     JSON.stringify(proof), actor.issueId, row.revision,
   ).execute();
   if (result.rows.affectedRows !== 1) throw new Error('Case changed while reset ran. Refresh and retry.');
+  await persistProofRevision(actor.issueId, proof);
   if (wasApproved && row.approved_revision !== null && row.approved_hash) {
     await appendApprovalHistory(actor.issueId, row.approved_revision, row.approved_hash, 'invalidated', actor.accountId, `Authorized reset created revision ${nextRevision}`);
   }
