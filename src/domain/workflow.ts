@@ -10,6 +10,8 @@ export type WorkflowCommand =
   | 'approve'
   | 'reset'
   | 'manage-roles'
+  | 'manage-configuration'
+  | 'register-source'
   | 'test-recovery'
   | 'run-platform-spike';
 
@@ -18,9 +20,9 @@ export type ProjectionStatus = 'not-requested' | 'pending' | 'synced' | 'failed'
 
 const grants: Record<AppRole, readonly WorkflowCommand[]> = {
   viewer: ['read'],
-  analyst: ['read', 'initialize', 'record-evidence', 'record-follow-up', 'challenge'],
-  supervisor: ['read', 'initialize', 'record-evidence', 'record-follow-up', 'challenge', 'approve', 'reset', 'test-recovery', 'run-platform-spike'],
-  operator: ['read', 'initialize', 'record-evidence', 'challenge', 'reset', 'manage-roles', 'test-recovery', 'run-platform-spike'],
+  analyst: ['read', 'initialize', 'record-evidence', 'record-follow-up', 'challenge', 'register-source'],
+  supervisor: ['read', 'initialize', 'record-evidence', 'record-follow-up', 'challenge', 'approve', 'reset', 'register-source', 'test-recovery', 'run-platform-spike'],
+  operator: ['read', 'initialize', 'record-evidence', 'challenge', 'reset', 'manage-roles', 'manage-configuration', 'register-source', 'test-recovery', 'run-platform-spike'],
 };
 
 export function can(role: AppRole, command: WorkflowCommand): boolean {

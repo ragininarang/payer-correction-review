@@ -25,6 +25,10 @@ describe('workflow safety policy', () => {
     expect(can('analyst', 'run-platform-spike')).toBe(false);
     expect(can('supervisor', 'run-platform-spike')).toBe(true);
     expect(can('operator', 'run-platform-spike')).toBe(true);
+    expect(can('supervisor', 'manage-configuration')).toBe(false);
+    expect(can('operator', 'manage-configuration')).toBe(true);
+    expect(can('viewer', 'register-source')).toBe(false);
+    expect(can('analyst', 'register-source')).toBe(true);
   });
 
   it('allows payer follow-up only for workflow participants', () => {

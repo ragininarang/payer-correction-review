@@ -17,6 +17,12 @@ import { buildProof } from '../domain/proof';
 import { approvedProjection, invalidatedProjection, isMatchingProjection, nextProjectionStatus } from '../domain/projection';
 import type { CorrectionProof, ProofInput } from '../domain/types';
 import {
+  evaluateIntakeTransition,
+  validateSourceManifest,
+  type IntakeDecision,
+  type SourceManifest,
+} from '../domain/intake';
+import {
   classifyEvidence,
   contentHash,
   planEvidenceRecovery,
@@ -101,6 +107,45 @@ interface StageRunRow {
   telemetry_json: string;
   result_json: string | null;
   updated_at: string;
+}
+
+interface ProjectConfigRow {
+  project_id: string;
+  project_key: string;
+  enabled: number;
+  notice_field_id: string;
+  configured_by: string;
+  configured_at: string;
+}
+
+interface SourceManifestRow {
+  manifest_key: string;
+  issue_id: string;
+  source_id: string;
+  source_kind: SourceManifest['sourceKind'];
+  source_version: string;
+  content_hash: string;
+  manifest_json: string;
+  registered_by: string;
+  registered_at: string;
+}
+
+interface IntakeEventRow {
+  intake_event_id: string;
+  issue_id: string;
+  outcome: 'awaiting-inputs' | 'eligible';
+  missing_json: string;
+  occurred_at: string;
+}
+
+interface JiraIssueUpdatedEvent extends Record<string, unknown> {
+  eventType?: unknown;
+  selfGenerated?: unknown;
+  timestamp?: unknown;
+  atlassianId?: unknown;
+  customFields?: unknown;
+  issue?: unknown;
+  changelog?: unknown;
 }
 
 interface PlatformSpikeView {
@@ -273,6 +318,40 @@ const createJiraEffects = `CREATE TABLE IF NOT EXISTS correction_jira_effects (
   details_json MEDIUMTEXT NOT NULL,
   updated_at VARCHAR(40) NOT NULL
 )`;
+const createProjectConfig = `CREATE TABLE IF NOT EXISTS correction_project_config (
+  project_id VARCHAR(128) PRIMARY KEY,
+  project_key VARCHAR(64) NOT NULL,
+  enabled TINYINT NOT NULL,
+  notice_field_id VARCHAR(64) NOT NULL,
+  configured_by VARCHAR(128) NOT NULL,
+  configured_at VARCHAR(40) NOT NULL
+)`;
+const createSourceManifests = `CREATE TABLE IF NOT EXISTS correction_source_manifests (
+  manifest_key VARCHAR(220) PRIMARY KEY,
+  issue_id VARCHAR(128) NOT NULL,
+  source_id VARCHAR(128) NOT NULL,
+  source_kind VARCHAR(40) NOT NULL,
+  source_version VARCHAR(64) NOT NULL,
+  content_hash VARCHAR(64) NOT NULL,
+  manifest_json MEDIUMTEXT NOT NULL,
+  registered_by VARCHAR(128) NOT NULL,
+  registered_at VARCHAR(40) NOT NULL,
+  UNIQUE KEY correction_manifest_identity (issue_id, source_id)
+)`;
+const createIntakeEvents = `CREATE TABLE IF NOT EXISTS correction_intake_events (
+  intake_event_id VARCHAR(128) PRIMARY KEY,
+  issue_id VARCHAR(128) NOT NULL,
+  project_id VARCHAR(128) NOT NULL,
+  from_status VARCHAR(128) NULL,
+  to_status VARCHAR(128) NULL,
+  notice_reference VARCHAR(128) NULL,
+  outcome VARCHAR(30) NOT NULL,
+  missing_json MEDIUMTEXT NOT NULL,
+  manifest_ids_json MEDIUMTEXT NOT NULL,
+  actor_id VARCHAR(128) NOT NULL,
+  occurred_at VARCHAR(40) NOT NULL,
+  UNIQUE KEY correction_intake_issue_event (issue_id, intake_event_id)
+)`;
 
 migrationRunner.enqueue('v001_correction_cases', createLegacyCases);
 migrationRunner.enqueue('v002_case_control', createCaseControl);
@@ -286,6 +365,9 @@ migrationRunner.enqueue('v009_payer_followups', createPayerFollowups);
 migrationRunner.enqueue('v010_stage_runs', createStageRuns);
 migrationRunner.enqueue('v011_jira_effects', createJiraEffects);
 migrationRunner.enqueue('v012_stage_run_results', 'ALTER TABLE correction_stage_runs ADD COLUMN result_json MEDIUMTEXT NULL');
+migrationRunner.enqueue('v013_project_config', createProjectConfig);
+migrationRunner.enqueue('v014_source_manifests', createSourceManifests);
+migrationRunner.enqueue('v015_intake_events', createIntakeEvents);
 
 export async function runMigration(): Promise<void> {
   await migrationRunner.run();
@@ -471,6 +553,18 @@ async function authorizeIssue(issueId: string): Promise<void> {
   if (!response.ok) throw new Error('This Jira issue is unavailable to your account.');
 }
 
+async function readIssueProject(issueId: string): Promise<{ id: string; key: string }> {
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${issueId}?fields=project`);
+  if (!response.ok) throw new Error('The Jira project is unavailable to your account.');
+  const body = await response.json() as { fields?: { project?: { id?: unknown; key?: unknown } } };
+  const id = body.fields?.project?.id;
+  const key = body.fields?.project?.key;
+  if (typeof id !== 'string' || !/^\d{1,18}$/.test(id) || typeof key !== 'string') {
+    throw new Error('The Jira project identity is unavailable.');
+  }
+  return { id, key };
+}
+
 function isAppRole(value: unknown): value is AppRole {
   return value === 'viewer' || value === 'analyst' || value === 'supervisor' || value === 'operator';
 }
@@ -526,6 +620,119 @@ function parseObject(value: string): Record<string, unknown> {
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function parseManifest(value: string): SourceManifest | null {
+  try { return validateSourceManifest(JSON.parse(value) as unknown); } catch { return null; }
+}
+
+async function readSourceManifests(issueId: string): Promise<SourceManifest[]> {
+  const result = await sql.prepare<SourceManifestRow>(`SELECT manifest_key, issue_id, source_id, source_kind,
+    source_version, content_hash, manifest_json, registered_by, registered_at
+    FROM correction_source_manifests WHERE issue_id = ? ORDER BY registered_at ASC`).bindParams(issueId).execute();
+  return result.rows.map((row) => parseManifest(row.manifest_json)).filter((item): item is SourceManifest => item !== null);
+}
+
+async function registerSourceManifest(issueId: string, manifest: SourceManifest, actorId: string): Promise<void> {
+  const manifestKey = `${issueId}:${manifest.sourceId}`;
+  const existing = await sql.prepare<SourceManifestRow>(`SELECT manifest_key, issue_id, source_id, source_kind,
+    source_version, content_hash, manifest_json, registered_by, registered_at
+    FROM correction_source_manifests WHERE issue_id = ? AND source_id = ?`).bindParams(issueId, manifest.sourceId).execute();
+  const current = existing.rows[0];
+  if (current && current.content_hash !== manifest.contentHash) {
+    throw new Error('This source ID is already registered with different content. Register a new version instead.');
+  }
+  if (current) return;
+  await sql.prepare(`INSERT INTO correction_source_manifests
+    (manifest_key, issue_id, source_id, source_kind, source_version, content_hash, manifest_json, registered_by, registered_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bindParams(
+    manifestKey, issueId, manifest.sourceId, manifest.sourceKind, manifest.sourceVersion, manifest.contentHash,
+    JSON.stringify(manifest), actorId, new Date().toISOString(),
+  ).execute();
+}
+
+function syntheticManifest(
+  sourceKind: SourceManifest['sourceKind'],
+  sourceId: string,
+  sourceVersion: string,
+  payload: Record<string, unknown>,
+): SourceManifest {
+  const dated = sourceKind === 'payer-notice' || sourceKind === 'payment-basis';
+  return validateSourceManifest({
+    schemaVersion: '1.0',
+    sourceId,
+    sourceKind,
+    sourceVersion,
+    contentHash: contentHash(payload),
+    payerId: 'payer-demo',
+    effectiveFrom: dated ? '2026-10-01' : null,
+    effectiveThrough: dated ? '2026-10-31' : null,
+    provenance: 'Generated synthetic fixture for the Codegeist judging workflow.',
+    visibility: sourceKind === 'local-procedure' ? 'billing-supervisors' : 'case-team',
+    itemCount: sourceKind === 'independent-inventory' ? 13 : sourceKind === 'remittance-batch' ? 23 : null,
+    coverage: sourceKind === 'independent-inventory' ? 'complete'
+      : sourceKind === 'remittance-batch' ? 'partial' : 'not-applicable',
+    supersedesSourceId: null,
+  });
+}
+
+async function registerSyntheticManifests(issueId: string, actorId: string): Promise<void> {
+  const manifests = [
+    syntheticManifest('payer-notice', 'payer-notice-v1', '1', baseInput.notices[0] as unknown as Record<string, unknown>),
+    syntheticManifest('local-procedure', 'local-procedure-v1', '1', { name: 'Payer correction verification procedure', version: 1 }),
+    syntheticManifest('independent-inventory', 'submitted-claims-v1', '1', { lineIds: baseInput.inventory.map((item) => item.lineId) }),
+    syntheticManifest('payment-basis', 'payment-basis-v1', '1', { expectedNetCents: 10_000, basis: 'Synthetic approved rule' }),
+    syntheticManifest('remittance-batch', 'original-era-v1', '1', { eventIds: baseInput.events.map((item) => item.eventId) }),
+  ];
+  for (const manifest of manifests) await registerSourceManifest(issueId, manifest, actorId);
+}
+
+async function readProjectConfig(projectId: string): Promise<ProjectConfigRow | null> {
+  const result = await sql.prepare<ProjectConfigRow>(`SELECT project_id, project_key, enabled, notice_field_id,
+    configured_by, configured_at FROM correction_project_config WHERE project_id = ?`).bindParams(projectId).execute();
+  return result.rows[0] ?? null;
+}
+
+async function readLatestIntakeEvent(issueId: string): Promise<IntakeEventRow | null> {
+  const result = await sql.prepare<IntakeEventRow>(`SELECT intake_event_id, issue_id, outcome, missing_json, occurred_at
+    FROM correction_intake_events WHERE issue_id = ? ORDER BY occurred_at DESC LIMIT 1`).bindParams(issueId).execute();
+  return result.rows[0] ?? null;
+}
+
+function customFieldText(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const object = value as Record<string, unknown>;
+    for (const candidate of [object.value, object.id, object.key]) {
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    }
+  }
+  return null;
+}
+
+async function fetchNoticeReference(issueId: string, fieldId: string): Promise<string | null> {
+  const response = await api.asApp().requestJira(route`/rest/api/3/issue/${issueId}?fields=${fieldId}`);
+  if (!response.ok) return null;
+  const body = await response.json() as { fields?: Record<string, unknown> };
+  return customFieldText(body.fields?.[fieldId]);
+}
+
+function intakeStatusChange(event: JiraIssueUpdatedEvent): { field: string; from: string | null; to: string | null } | null {
+  const changelog = event.changelog && typeof event.changelog === 'object' ? event.changelog as Record<string, unknown> : null;
+  const items = Array.isArray(changelog?.items) ? changelog.items : [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const entry = item as Record<string, unknown>;
+    if (typeof entry.field === 'string' && entry.field.toLowerCase() === 'status') {
+      const toStringValue = Reflect.get(entry, 'toString') as unknown;
+      return {
+        field: entry.field,
+        from: typeof entry.fromString === 'string' ? entry.fromString : null,
+        to: typeof toStringValue === 'string' ? toStringValue : null,
+      };
+    }
+  }
+  return null;
 }
 
 function parsePlatformSpikeResult(value: string | null): PlatformSpikeGraphResult | null {
@@ -979,11 +1186,18 @@ resolver.define('startPlatformSpike', async ({ context }) => {
 resolver.define('getCase', async ({ context }) => {
   const actor = await authorize(context as ResolverContext, 'read');
   const row = await readCase(actor.issueId);
+  const latestIntake = await readLatestIntakeEvent(actor.issueId);
   return {
     case: row ? view(row, actor.role) : null,
     actorRole: actor.role,
     followUps: await readFollowUps(actor.issueId),
     history: await readHistory(actor.issueId),
+    sourceManifests: await readSourceManifests(actor.issueId),
+    intake: latestIntake ? {
+      outcome: latestIntake.outcome,
+      missing: JSON.parse(latestIntake.missing_json) as unknown,
+      occurredAt: latestIntake.occurred_at,
+    } : null,
     platformSpike: platformSpikeView(await readLatestPlatformSpike(actor.issueId)),
     development: {
       recoveryTestEnabled: process.env.PCR_ENABLE_RECOVERY_TEST === 'true',
@@ -1050,6 +1264,7 @@ resolver.define('initialize', async ({ context }) => {
   );
   await sql.prepare('UPDATE correction_source_events SET status = ?, resulting_revision = ? WHERE event_key = ?')
     .bindParams('applied', 1, baseline.row.event_key).execute();
+  await registerSyntheticManifests(actor.issueId, actor.accountId);
   await appendAudit(actor.issueId, 1, 'case-initialized', actor.accountId, { synthetic: true });
   const row = await readCase(actor.issueId);
   if (!row) throw new Error('Initialized case could not be reloaded.');
@@ -1199,5 +1414,114 @@ resolver.define('setRole', async ({ payload, context }) => {
   await appendAudit(actor.issueId, row?.revision ?? 0, 'role-mapped', actor.accountId, { targetAccountId: input.accountId, role: input.role });
   return { accountId: input.accountId, role: input.role };
 });
+
+resolver.define('registerSourceManifest', async ({ payload, context }) => {
+  const actor = await authorize(context as ResolverContext, 'register-source');
+  const manifest = validateSourceManifest(payloadObject(payload).manifest);
+  await registerSourceManifest(actor.issueId, manifest, actor.accountId);
+  const row = await readCase(actor.issueId);
+  await appendAudit(actor.issueId, row?.revision ?? 0, 'source-manifest-registered', actor.accountId, {
+    sourceId: manifest.sourceId,
+    sourceKind: manifest.sourceKind,
+    sourceVersion: manifest.sourceVersion,
+    contentHash: manifest.contentHash,
+  });
+  return manifest;
+});
+
+resolver.define('loadSyntheticSourceManifests', async ({ context }) => {
+  const actor = await authorize(context as ResolverContext, 'register-source');
+  await registerSyntheticManifests(actor.issueId, actor.accountId);
+  const row = await readCase(actor.issueId);
+  await appendAudit(actor.issueId, row?.revision ?? 0, 'synthetic-source-manifests-loaded', actor.accountId, {
+    sourceIds: (await readSourceManifests(actor.issueId)).map((item) => item.sourceId),
+  }, `synthetic-source-manifests:${actor.issueId}`);
+  return readSourceManifests(actor.issueId);
+});
+
+resolver.define('configureProjectAutomation', async ({ payload, context }) => {
+  const actor = await authorize(context as ResolverContext, 'manage-configuration');
+  const input = payloadObject(payload);
+  if (typeof input.projectId !== 'string' || !/^\d{1,18}$/.test(input.projectId)
+    || typeof input.projectKey !== 'string' || !/^[A-Z][A-Z0-9_-]{1,63}$/i.test(input.projectKey)
+    || typeof input.noticeFieldId !== 'string' || !/^customfield_\d+$/.test(input.noticeFieldId)
+    || typeof input.enabled !== 'boolean') {
+    throw new Error('Project, notice-reference field, and enabled state are required.');
+  }
+  const currentProject = await readIssueProject(actor.issueId);
+  if (input.projectId !== currentProject.id || input.projectKey.toUpperCase() !== currentProject.key.toUpperCase()) {
+    throw new Error('Configure automation from an issue in the same Jira project.');
+  }
+  const configuredAt = new Date().toISOString();
+  await sql.prepare(`INSERT INTO correction_project_config
+    (project_id, project_key, enabled, notice_field_id, configured_by, configured_at)
+    VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE project_key = ?, enabled = ?, notice_field_id = ?,
+    configured_by = ?, configured_at = ?`).bindParams(
+    input.projectId, input.projectKey.toUpperCase(), input.enabled ? 1 : 0, input.noticeFieldId, actor.accountId, configuredAt,
+    input.projectKey.toUpperCase(), input.enabled ? 1 : 0, input.noticeFieldId, actor.accountId, configuredAt,
+  ).execute();
+  const row = await readCase(actor.issueId);
+  await appendAudit(actor.issueId, row?.revision ?? 0, 'project-automation-configured', actor.accountId, {
+    projectId: input.projectId,
+    projectKey: input.projectKey.toUpperCase(),
+    enabled: input.enabled,
+    noticeFieldId: input.noticeFieldId,
+  });
+  return { projectId: input.projectId, projectKey: input.projectKey.toUpperCase(), enabled: input.enabled, noticeFieldId: input.noticeFieldId };
+});
+
+export async function handleIssueUpdated(event: JiraIssueUpdatedEvent): Promise<void> {
+  if (event.eventType !== 'avi:jira:updated:issue' || event.selfGenerated === true) return;
+  const change = intakeStatusChange(event);
+  if (!change) return;
+  const issue = event.issue && typeof event.issue === 'object' ? event.issue as Record<string, unknown> : null;
+  const fields = issue?.fields && typeof issue.fields === 'object' ? issue.fields as Record<string, unknown> : null;
+  const project = fields?.project && typeof fields.project === 'object' ? fields.project as Record<string, unknown> : null;
+  const issueId = typeof issue?.id === 'string' && /^\d{1,18}$/.test(issue.id) ? issue.id : null;
+  const projectId = typeof project?.id === 'string' && /^\d{1,18}$/.test(project.id) ? project.id : null;
+  if (!issueId || !projectId) return;
+
+  await runMigration();
+  const config = await readProjectConfig(projectId);
+  const customFields = event.customFields && typeof event.customFields === 'object'
+    ? event.customFields as Record<string, unknown> : {};
+  const noticeReference = config
+    ? customFieldText(customFields[config.notice_field_id]) ?? await fetchNoticeReference(issueId, config.notice_field_id)
+    : null;
+  const manifests = await readSourceManifests(issueId);
+  const decision: IntakeDecision = evaluateIntakeTransition({
+    projectOptedIn: config?.enabled === 1,
+    changedField: change.field,
+    fromStatus: change.from,
+    toStatus: change.to,
+    noticeReference,
+    manifests,
+  });
+  if (decision.outcome === 'ignored') return;
+
+  const timestampMillis = typeof event.timestamp === 'number' ? event.timestamp
+    : typeof event.timestamp === 'string' && /^\d+$/.test(event.timestamp) ? Number(event.timestamp) : null;
+  const occurredAt = timestampMillis !== null && Number.isFinite(timestampMillis)
+    ? new Date(timestampMillis).toISOString() : new Date(0).toISOString();
+  const actorId = typeof event.atlassianId === 'string' ? event.atlassianId : 'jira-event';
+  const intakeEventId = contentHash({ issueId, projectId, occurredAt, change, noticeReference });
+  const missing = decision.outcome === 'awaiting-inputs' ? decision.missing : [];
+  const manifestIds = decision.outcome === 'eligible' ? decision.manifestSourceIds : [];
+  const inserted = await sql.prepare<UpdateQueryResponse>(`INSERT IGNORE INTO correction_intake_events
+    (intake_event_id, issue_id, project_id, from_status, to_status, notice_reference, outcome,
+     missing_json, manifest_ids_json, actor_id, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bindParams(
+    intakeEventId, issueId, projectId, change.from, change.to, noticeReference, decision.outcome,
+    JSON.stringify(missing), JSON.stringify(manifestIds), actorId, occurredAt,
+  ).execute();
+  if (inserted.rows.affectedRows !== 1) return;
+  const row = await readCase(issueId);
+  await appendAudit(issueId, row?.revision ?? 0, decision.outcome === 'eligible' ? 'intake-qualified' : 'intake-awaiting-inputs', actorId, {
+    intakeEventId,
+    noticeReference,
+    missing,
+    manifestIds,
+    modelCallsStarted: 0,
+  });
+}
 
 export const handler = resolver.getDefinitions();

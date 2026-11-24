@@ -71,14 +71,34 @@ interface PlatformSpikeView {
   } | null;
   updatedAt: string;
 }
+interface SourceManifestView {
+  schemaVersion: '1.0';
+  sourceId: string;
+  sourceKind: 'payer-notice' | 'local-procedure' | 'independent-inventory' | 'payment-basis' | 'remittance-batch';
+  sourceVersion: string;
+  payerId: string;
+  effectiveFrom: string | null;
+  effectiveThrough: string | null;
+  itemCount: number | null;
+  coverage: 'complete' | 'partial' | 'not-applicable';
+}
 interface WorkspaceResponse {
   case: CaseView | null;
   actorRole: AppRole;
   followUps?: FollowUp[];
   history?: HistoryEvent[];
+  sourceManifests?: SourceManifestView[];
   platformSpike?: PlatformSpikeView | null;
   development?: { recoveryTestEnabled?: boolean; platformSpikeEnabled?: boolean; openAiConfigured?: boolean };
 }
+
+const localSourceManifests: SourceManifestView[] = [
+  { schemaVersion: '1.0', sourceId: 'submitted-claims-v1', sourceKind: 'independent-inventory', sourceVersion: '1', payerId: 'payer-demo', effectiveFrom: null, effectiveThrough: null, itemCount: 13, coverage: 'complete' },
+  { schemaVersion: '1.0', sourceId: 'payer-notice-v1', sourceKind: 'payer-notice', sourceVersion: '1', payerId: 'payer-demo', effectiveFrom: '2026-10-01', effectiveThrough: '2026-10-31', itemCount: null, coverage: 'not-applicable' },
+  { schemaVersion: '1.0', sourceId: 'payment-basis-v1', sourceKind: 'payment-basis', sourceVersion: '1', payerId: 'payer-demo', effectiveFrom: '2026-10-01', effectiveThrough: '2026-10-31', itemCount: null, coverage: 'not-applicable' },
+  { schemaVersion: '1.0', sourceId: 'local-procedure-v1', sourceKind: 'local-procedure', sourceVersion: '1', payerId: 'payer-demo', effectiveFrom: null, effectiveThrough: null, itemCount: null, coverage: 'not-applicable' },
+  { schemaVersion: '1.0', sourceId: 'original-era-v1', sourceKind: 'remittance-batch', sourceVersion: '1', payerId: 'payer-demo', effectiveFrom: null, effectiveThrough: null, itemCount: 23, coverage: 'partial' },
+];
 
 function proofFor(step: Step): CorrectionProof {
   const input = step === 'missing' ? baseInput : step === 'corrected' ? withFinalReplacement()
@@ -138,11 +158,24 @@ function followUpLabel(value: string): string {
           : value === 'no-response' ? 'no response' : 'closed without pursuit');
 }
 
-function SourceList({ step }: { step: Step }) {
+function sourceKindLabel(kind: SourceManifestView['sourceKind']): string {
+  if (kind === 'payer-notice') return 'Payer correction notice';
+  if (kind === 'local-procedure') return 'Local verification procedure';
+  if (kind === 'independent-inventory') return 'Submitted claims list';
+  if (kind === 'payment-basis') return 'Expected payment rule';
+  return 'Payment activity batch';
+}
+
+function sourceManifestDetail(source: SourceManifestView): string {
+  if (source.sourceKind === 'independent-inventory') return `${source.itemCount ?? 0} service lines · Coverage confirmed`;
+  if (source.effectiveFrom && source.effectiveThrough) return `${dateLabel(source.effectiveFrom)}–${dateLabel(source.effectiveThrough)}`;
+  if (source.itemCount !== null) return `${source.itemCount} payment records`;
+  return `Version ${source.sourceVersion}`;
+}
+
+function SourceList({ step, manifests }: { step: Step; manifests: SourceManifestView[] }) {
   return <div className="source-list">
-    <article><div className="source-icon">C</div><div><strong>Submitted claims list</strong><span>13 service lines · Coverage confirmed</span></div><Lozenge appearance="success">Current</Lozenge></article>
-    <article><div className="source-icon">N</div><div><strong>Payer correction notice</strong><span>Effective Oct 1–31, 2026</span></div><Lozenge appearance="success">Current</Lozenge></article>
-    <article><div className="source-icon">P</div><div><strong>Original payment activity</strong><span>Imported Nov 1, 2026</span></div><Lozenge>Checked</Lozenge></article>
+    {manifests.map((source) => <article key={source.sourceId}><div className="source-icon">{sourceKindLabel(source.sourceKind).charAt(0)}</div><div><strong>{sourceKindLabel(source.sourceKind)}</strong><span>{sourceManifestDetail(source)}</span></div><Lozenge appearance="success">Current</Lozenge></article>)}
     <article><div className="source-icon">P</div><div><strong>Replacement payment activity</strong><span>{step === 'missing' ? 11 : 12} adjustments matched</span></div><Lozenge appearance="information">Updated</Lozenge></article>
     {step === 'reversed' && <article><div className="source-icon">R</div><div><strong>Late reversal activity</strong><span>Imported Nov 23, 2026 · Result changed</span></div><Lozenge appearance="removed">New</Lozenge></article>}
   </div>;
@@ -198,6 +231,7 @@ function App() {
   const [technicalOpen, setTechnicalOpen] = useState(false);
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
   const [history, setHistory] = useState<HistoryEvent[]>([]);
+  const [sourceManifests, setSourceManifests] = useState<SourceManifestView[]>(() => forgeMode ? [] : localSourceManifests);
   const [recoveryTestEnabled, setRecoveryTestEnabled] = useState(false);
   const [platformSpikeEnabled, setPlatformSpikeEnabled] = useState(false);
   const [openAiConfigured, setOpenAiConfigured] = useState(false);
@@ -212,6 +246,7 @@ function App() {
       setPlatformSpikeEnabled(result.development?.platformSpikeEnabled === true);
       setOpenAiConfigured(result.development?.openAiConfigured === true);
       setPlatformSpike(result.platformSpike ?? null);
+      setSourceManifests(result.sourceManifests ?? []);
       if (result.case) { setView({ ...result.case, mode: 'forge' }); setHasCase(true); setFollowUps(result.followUps ?? []); setHistory(result.history ?? []); }
       else { setView((current) => ({ ...current, actorRole: result.actorRole, mode: 'forge' })); setHasCase(false); }
     }).catch((error: unknown) => showMessage(error instanceof Error ? error.message : 'Unable to load this correction review.', 'danger')).finally(() => setBusy(false));
@@ -258,6 +293,19 @@ function App() {
       showMessage(action === 'approve' ? 'Closure approved. The Jira update will be tracked separately.' : 'The correction review was updated.', 'success');
     } catch (error: unknown) { showMessage(error instanceof Error ? error.message : 'The action failed. No financial result was changed.', 'danger'); }
     finally { setBusy(false); }
+  }
+
+  async function loadSyntheticSources() {
+    setBusy(true);
+    try {
+      const sources = await callForge<SourceManifestView[]>('loadSyntheticSourceManifests');
+      setSourceManifests(sources);
+      const workspace = await callForge<WorkspaceResponse>('getCase');
+      setHistory(workspace.history ?? []);
+      showMessage('The synthetic source records are ready for deterministic intake checks.', 'success');
+    } catch (error: unknown) {
+      showMessage(error instanceof Error ? error.message : 'The synthetic source records could not be loaded.', 'danger');
+    } finally { setBusy(false); }
   }
 
   const attentionCount = view.proof.obligations.filter((item) => item.status !== 'corrected').length + view.proof.findings.filter((item) => item.outcome !== 'refuted').length;
@@ -361,7 +409,7 @@ function App() {
         <div className="exception-workspace"><div className="table-container"><table><thead><tr><th><span className="sr-only">Select</span></th><th>Claim and service line</th><th>Service</th><th>Expected</th><th>Observed</th><th>Status</th></tr></thead><tbody>{claims.map((item) => <tr key={item.lineId} className={selectedLineId === item.lineId ? 'selected-row' : ''} onClick={() => setSelectedLineId(item.lineId)}><td><input aria-label={`Select ${lineName(item)}`} type="checkbox" checked={selectedLineIds.has(item.lineId)} onChange={() => toggleLine(item.lineId)} onClick={(event) => event.stopPropagation()} /></td><td><button className="line-link" onClick={() => setSelectedLineId(item.lineId)}>{item.claimId}<span>Service line {item.serviceLineNumber}</span></button></td><td>{dateLabel(item.serviceDate)}<span className="cell-subtext">Procedure {item.procedureCode}</span></td><td>{currency(item.expectedNetCents)}</td><td>{item.observedNetCents === null ? 'Unknown' : currency(item.observedNetCents)}</td><td><Lozenge appearance={lineAppearance(item.status)}>{lineStatus(item.status)}</Lozenge></td></tr>)}</tbody></table>{!claims.length && <div className="table-empty"><h3>No claims match</h3><p>Clear the search or choose another filter.</p><Button onClick={() => { setSearch(''); setFilter('all'); }}>Show all claims</Button></div>}</div>
           <aside className="line-panel">{selectedLine ? <><div><span className="overline">Claim details</span><h2>{selectedLine.claimId}</h2><Lozenge appearance={lineAppearance(selectedLine.status)}>{lineStatus(selectedLine.status)}</Lozenge><p className="panel-subtitle">Service line {selectedLine.serviceLineNumber} · {dateLabel(selectedLine.serviceDate)} · Procedure {selectedLine.procedureCode}</p></div><dl><div><dt>Expected payment</dt><dd>{currency(selectedLine.expectedNetCents)}</dd></div><div><dt>Payment found</dt><dd>{selectedLine.observedNetCents === null ? 'Unknown' : currency(selectedLine.observedNetCents)}</dd></div><div><dt>Amount still unresolved</dt><dd>{currency(Math.max(0, selectedLine.expectedNetCents - (selectedLine.observedNetCents ?? 0)))}</dd></div></dl><div className="reason"><strong>Why this result</strong><p>{selectedLine.status === 'corrected' ? 'Accepted payment activity matches the expected amount.' : selectedLine.status === 'missing' ? 'No replacement payment was found before the evidence cutoff.' : selectedLine.status === 'ambiguous' ? 'The reversal or adjustment relationship cannot be confirmed.' : 'The payment found does not match the expected amount.'}</p></div><div className="evidence-chain"><strong>Documents checked</strong><button><span>Submitted claims list</span><small>Current</small></button>{selectedLine.eventIds.length > 0 && <button><span>Payment activity</span><small>{selectedLine.eventIds.length} record{selectedLine.eventIds.length === 1 ? '' : 's'}</small></button>}</div><Button shouldFitContainer onClick={() => toggleLine(selectedLine.lineId)}>{selectedLineIds.has(selectedLine.lineId) ? 'Remove from payer follow-up' : 'Add to payer follow-up'}</Button></> : <div className="panel-empty"><h3>Select a claim</h3><p>Choose a row to see its payment result and documents checked.</p></div>}</aside></div></div></TabPanel>
 
-      <TabPanel><div className="tab-content split-page"><section className="main-column"><div className="section-heading"><div><h2>Included claims and evidence</h2><p>See why claims are included and which documents support the review</p></div><Button onClick={() => setEvidenceOpen(true)}>Add evidence</Button></div><SourceList step={view.step} /></section><aside className="context-column"><section><h2>Confirmed inclusion criteria</h2><dl><div><dt>Payer</dt><dd>Payer Demo</dd></div><div><dt>Service dates</dt><dd>Oct 1–31, 2026</dd></div><div><dt>Starting list</dt><dd>Submitted claims</dd></div><div><dt>Expected payment</dt><dd>$100.00 per service line</dd></div><div><dt>Confirmed by</dt><dd>Billing supervisor</dd></div></dl><Button appearance="subtle" onClick={() => setCriteriaOpen(true)}>View criteria and cited notice</Button></section><SectionMessage appearance="information" title="Payment files do not decide which claims are included"><p>The claims list and confirmed payer notice define the included service lines before payment activity is checked.</p></SectionMessage></aside></div></TabPanel>
+      <TabPanel><div className="tab-content split-page"><section className="main-column"><div className="section-heading"><div><h2>Included claims and evidence</h2><p>See why claims are included and which documents support the review</p></div><Button onClick={() => setEvidenceOpen(true)}>Add evidence</Button></div>{sourceManifests.length === 0 && forgeMode && <SectionMessage appearance="warning" title="Source records are not prepared"><p>Load the synthetic notice, submitted claims list, payment rule, procedure, and payment batch before testing automated intake.</p><Button onClick={() => void loadSyntheticSources()} isDisabled={busy}>Load synthetic source records</Button></SectionMessage>}<SourceList step={view.step} manifests={sourceManifests} /></section><aside className="context-column"><section><h2>Confirmed inclusion criteria</h2><dl><div><dt>Payer</dt><dd>Payer Demo</dd></div><div><dt>Service dates</dt><dd>Oct 1–31, 2026</dd></div><div><dt>Starting list</dt><dd>Submitted claims</dd></div><div><dt>Expected payment</dt><dd>$100.00 per service line</dd></div><div><dt>Confirmed by</dt><dd>Billing supervisor</dd></div></dl><Button appearance="subtle" onClick={() => setCriteriaOpen(true)}>View criteria and cited notice</Button></section><SectionMessage appearance="information" title="Payment files do not decide which claims are included"><p>The claims list and confirmed payer notice define the included service lines before payment activity is checked.</p></SectionMessage></aside></div></TabPanel>
 
       <TabPanel><div className="tab-content follow-up-page"><div className="section-heading"><div><h2>Payer follow-up</h2><p>Record contact about unresolved items. A note never changes the financial result.</p></div></div>{!selectedLineIds.size ? <div className="empty-state"><h3>No claims selected</h3><p>Select unresolved service lines from Claims before preparing payer follow-up.</p>{latestFollowUp && <p>Most recent: {followUpLabel(latestFollowUp.outcome)} · Next review {latestFollowUp.nextReviewDate}</p>}<Button appearance="primary" onClick={() => { setFilter('attention'); setSelectedTab(1); }}>Choose claims</Button></div> : <div className="follow-up-grid"><section className="selected-claims"><h3>Selected for follow-up</h3>{view.proof.obligations.filter((item) => selectedLineIds.has(item.lineId)).map((item) => <article key={item.lineId}><div><strong>{lineName(item)}</strong><span>{dateLabel(item.serviceDate)} · Procedure {item.procedureCode}</span></div><span>{currency(Math.max(0, item.expectedNetCents - (item.observedNetCents ?? 0)))} unresolved</span></article>)}</section><form className="follow-up-form" onSubmit={(event) => void saveFollowUp(event)}><h3>Record payer contact</h3><label>Outcome<select name="outcome" defaultValue={latestFollowUp?.outcome ?? ''}><option value="" disabled>Choose an outcome</option><option value="payer-researching">Payer researching</option><option value="additional-information-requested">Additional information requested</option><option value="correction-promised">Correction promised</option><option value="payer-disputes-correction">Payer disputes correction</option><option value="no-response">No response</option><option value="closed-without-pursuit">Stop pursuing internally</option></select></label><label>Next review date<input name="nextReviewDate" type="date" defaultValue={latestFollowUp?.nextReviewDate ?? '2026-11-30'} /></label><label>Internal note<textarea name="note" rows={4} defaultValue={latestFollowUp?.note ?? ''} placeholder="What should the next person know?" /></label><SectionMessage appearance="information"><p>Saving this contact does not mark claims as paid. “Stop pursuing” also leaves the amount financially unresolved.</p></SectionMessage><Button appearance="primary" type="submit" isDisabled={busy}>Save payer follow-up</Button></form></div>}</div></TabPanel>
 

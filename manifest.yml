@@ -14,6 +14,15 @@ modules:
     - key: platform-spike-worker
       handler: forge/index.runPlatformSpikeWorker
       timeoutSeconds: 120
+    - key: intake-trigger-fn
+      handler: forge/index.handleIssueUpdated
+  trigger:
+    - key: correction-intake-trigger
+      function: intake-trigger-fn
+      events:
+        - avi:jira:updated:issue
+      filter:
+        ignoreSelf: true
   consumer:
     - key: platform-spike-consumer
       queue: platform-spike-queue
