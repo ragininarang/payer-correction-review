@@ -2,6 +2,8 @@
 
 **Purpose:** make agent quality and product value falsifiable before prompt tuning or demo claims. This plan evaluates agent outputs; deterministic financial correctness remains governed by the proof suite.
 
+**Current status, November 26, 2026:** the Evidence role now has a typed, read-only production contract and six deterministic contract cases. This does not satisfy its enablement gate. Labeled oracle fixtures, a deployed worker adapter, live model results and baseline comparisons remain required. See the [Evidence-agent contract record](docs/verification/phase5-evidence-agent-contract.md).
+
 ## Oracle format
 
 Each labeled case is a versioned fixture containing:
