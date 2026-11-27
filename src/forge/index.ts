@@ -565,6 +565,25 @@ async function readIssueProject(issueId: string): Promise<{ id: string; key: str
   return { id, key };
 }
 
+async function userCanAdministerProject(projectId: string): Promise<boolean> {
+  const response = await api.asUser().requestJira(route`/rest/api/3/mypermissions?projectId=${projectId}&permissions=ADMINISTER_PROJECTS`);
+  if (!response.ok) return false;
+  const body = await response.json() as { permissions?: { ADMINISTER_PROJECTS?: { havePermission?: unknown } } };
+  return body.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
+}
+
+async function discoverNoticeReferenceField(issueId: string): Promise<string | null> {
+  const response = await api.asUser().requestJira(route`/rest/api/3/issue/${issueId}/editmeta`);
+  if (!response.ok) return null;
+  const body = await response.json() as { fields?: Record<string, { name?: unknown }> };
+  for (const [fieldId, field] of Object.entries(body.fields ?? {})) {
+    if (/^customfield_\d+$/.test(fieldId)
+      && typeof field.name === 'string'
+      && field.name.trim().toLowerCase() === 'payer notice reference') return fieldId;
+  }
+  return null;
+}
+
 function isAppRole(value: unknown): value is AppRole {
   return value === 'viewer' || value === 'analyst' || value === 'supervisor' || value === 'operator';
 }
@@ -592,6 +611,25 @@ async function authorize(context: ResolverContext, command: WorkflowCommand): Pr
   const role = await readRole(accountId);
   requireCommand(role, command);
   return { issueId, accountId, role };
+}
+
+async function authorizeProjectConfiguration(context: ResolverContext): Promise<{
+  issueId: string;
+  accountId: string;
+  role: AppRole;
+  project: { id: string; key: string };
+}> {
+  await runMigration();
+  const issueId = issueIdFromContext(context);
+  const accountId = accountIdFromContext(context);
+  await authorizeIssue(issueId);
+  const role = await readRole(accountId);
+  const project = await readIssueProject(issueId);
+  if (role === 'operator') requireCommand(role, 'manage-configuration');
+  else if (role !== 'supervisor' || !await userCanAdministerProject(project.id)) {
+    throw new Error('Only an app operator or a billing supervisor who administers this Jira project can configure automated intake.');
+  }
+  return { issueId, accountId, role, project };
 }
 
 function inputFor(step: Step, issueId: string, revision: number): ProofInput {
@@ -1187,6 +1225,11 @@ resolver.define('getCase', async ({ context }) => {
   const actor = await authorize(context as ResolverContext, 'read');
   const row = await readCase(actor.issueId);
   const latestIntake = await readLatestIntakeEvent(actor.issueId);
+  const project = await readIssueProject(actor.issueId);
+  const projectConfig = await readProjectConfig(project.id);
+  const canManageConfiguration = actor.role === 'operator'
+    || (actor.role === 'supervisor' && await userCanAdministerProject(project.id));
+  const noticeFieldId = await discoverNoticeReferenceField(actor.issueId);
   return {
     case: row ? view(row, actor.role) : null,
     actorRole: actor.role,
@@ -1199,6 +1242,13 @@ resolver.define('getCase', async ({ context }) => {
       occurredAt: latestIntake.occurred_at,
     } : null,
     platformSpike: platformSpikeView(await readLatestPlatformSpike(actor.issueId)),
+    automationSetup: {
+      project,
+      enabled: projectConfig?.enabled === 1,
+      configuredNoticeFieldId: projectConfig?.notice_field_id ?? null,
+      discoveredNoticeFieldId: noticeFieldId,
+      canManageConfiguration,
+    },
     development: {
       recoveryTestEnabled: process.env.PCR_ENABLE_RECOVERY_TEST === 'true',
       platformSpikeEnabled: process.env.PCR_ENABLE_PLATFORM_SPIKE === 'true',
@@ -1440,7 +1490,7 @@ resolver.define('loadSyntheticSourceManifests', async ({ context }) => {
 });
 
 resolver.define('configureProjectAutomation', async ({ payload, context }) => {
-  const actor = await authorize(context as ResolverContext, 'manage-configuration');
+  const actor = await authorizeProjectConfiguration(context as ResolverContext);
   const input = payloadObject(payload);
   if (typeof input.projectId !== 'string' || !/^\d{1,18}$/.test(input.projectId)
     || typeof input.projectKey !== 'string' || !/^[A-Z][A-Z0-9_-]{1,63}$/i.test(input.projectKey)
@@ -1448,7 +1498,7 @@ resolver.define('configureProjectAutomation', async ({ payload, context }) => {
     || typeof input.enabled !== 'boolean') {
     throw new Error('Project, notice-reference field, and enabled state are required.');
   }
-  const currentProject = await readIssueProject(actor.issueId);
+  const currentProject = actor.project;
   if (input.projectId !== currentProject.id || input.projectKey.toUpperCase() !== currentProject.key.toUpperCase()) {
     throw new Error('Configure automation from an issue in the same Jira project.');
   }

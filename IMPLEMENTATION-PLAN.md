@@ -1,6 +1,6 @@
 # Payer Correction Review — build implementation plan
 
-**Status:** implementation in progress. Gates 1–3 are complete. Phase 4’s deterministic intake contract, versioned source manifests, Jira update trigger and evidence-readiness interface are deployed in Forge version 4.5.0. Local checks, Forge lint and 34 tests pass. Gate 4 remains open until the qualifying and missing-input paths are exercised in a purpose-configured internal JSM test project; the current `MOBL` issue is not a valid substitute. See the [Phase 4 verification record](docs/verification/phase4-intake-and-source-manifests.md). Follow [binding decisions](DECISIONS.md), [requirements](PRD.md), [system design](SYSTEM-DESIGN.md), and [evaluation plan](EVALUATION-PLAN.md). Work does not advance past a gate until its evidence is recorded.
+**Status:** implementation in progress. Gates 1–4 are complete. Phase 4’s deterministic intake contract, versioned source manifests, Jira update trigger, project-admin setup and evidence-readiness interface are deployed in Forge version 4.7.0. Local checks, Forge lint and 34 tests pass. Live verification in the purpose-configured `PCR` JSM project proved the missing-input, eligible-intake, communication-without-evidence and evidence-created-revision boundaries. See the [Phase 4 verification record](docs/verification/phase4-intake-and-source-manifests.md). Follow [binding decisions](DECISIONS.md), [requirements](PRD.md), [system design](SYSTEM-DESIGN.md), and [evaluation plan](EVALUATION-PLAN.md). Work does not advance past a gate until its evidence is recorded.
 
 ## MVP definition
 
@@ -89,7 +89,7 @@ The MVP proves one end-to-end synthetic journey: a payer reports a correction fi
 4. Versioned manifests for notice, procedure, independent inventory, payment basis and remittance batches.
 5. Provider-relations communication events and next-review date.
 
-**Gate 4:** ordinary issue creation causes no model call; missing input produces a named request; a payer reply changes proof only after referenced evidence is registered.
+**Gate 4 — passed November 26, 2026:** ordinary issue creation causes no model call; missing input produces a named request; complete inputs produce one auditable eligible event; a payer contact record does not change the financial result; and only registered evidence creates the next proof revision.
 
 ## Phase 5 — agent contracts, one role at a time
 
