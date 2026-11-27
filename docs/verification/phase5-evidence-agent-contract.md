@@ -15,7 +15,9 @@
 - Tool-budget exhaustion, read failure, denied critical evidence and incomplete coverage remain explicit. None can become a completed evidence pack silently.
 - A revision-currentness check stops stale work before the analysis call can publish.
 - OpenAI integration uses structured Responses API outputs, `store: false`, two idempotency keys, fixed timeouts and a pinned prompt version. Source text is explicitly treated as untrusted evidence rather than instructions.
-- Strict TypeScript, 40 tests, the production UI build and Forge lint pass.
+- A model-independent oracle now covers O1, O5–O8 and O12–O14. It scores closure-critical source recall, exact-version citation recall, contradiction recall, denied-source leakage and honest coverage disclosure.
+- The Evidence enablement gate requires all eight cases; omitting even one case fails the gate.
+- Strict TypeScript, 43 tests, the production UI build and Forge lint pass.
 
 ## Initial contract cases
 
@@ -29,7 +31,7 @@
 
 ## Still required before Evidence-agent enablement
 
-1. Build the labeled Evidence fixtures for O1, O5–O8 and O12–O14 from `EVALUATION-PLAN.md` without using model output to set the gold labels.
+1. Have a named domain reviewer adjudicate the predeclared synthetic gold labels; do not change them to fit model output.
 2. Add the Forge worker adapter that reads only authorized, current source versions and persists the pack against the active case revision.
 3. Run the pinned OpenAI model on the labeled safety set and compare it with deterministic-only and one-agent baselines.
 4. Demonstrate 100% retrieval of closure-critical permitted sources, zero denied-content leakage and explicit reporting of every incomplete search.

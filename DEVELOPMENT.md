@@ -32,7 +32,7 @@ The Phase 3 path can call OpenAI only when `PCR_ENABLE_PLATFORM_SPIKE=true`, `OP
 
 ## Current verification
 
-- `npm test`: 40 deterministic proof, authorization, evidence-ledger, recovery-contract, Jira-projection, platform-spike, source-manifest, intake and Evidence-agent contract tests.
+- `npm test`: 43 deterministic proof, authorization, evidence-ledger, recovery-contract, Jira-projection, platform-spike, source-manifest, intake, Evidence-agent contract and Evidence-oracle tests.
 - `npm run typecheck`: strict TypeScript contracts.
 - `npm run build`: production Custom UI bundle.
 - `forge lint`: Forge manifest and packaging validation; requires Forge authentication for some checks.
@@ -42,6 +42,6 @@ The Phase 3 path can call OpenAI only when `PCR_ENABLE_PLATFORM_SPIKE=true`, `OP
 - Jira projection worker: writes the current approved or invalidated revision/hash to the app-owned `payer-correction-proof` issue property, reads it back, and marks the effect synced only on an exact match. Stale effects conflict; transient failures retry at most three times.
 - Phase 3 deployment: the bounded OpenAI call, LangGraph packaging, SQL-persisted second invocation and fail-closed paths passed in the deployed Forge environment. See [the verification record](docs/verification/phase3-platform-spike.md).
 - Phase 4 deployment: the purpose-configured `PCR` JSM project passed the missing-input, eligible-intake, no-evidence follow-up and registered-evidence revision tests. See [the verification record](docs/verification/phase4-intake-and-source-manifests.md).
-- Phase 5 foundation: the typed, read-only Evidence-agent contract and deterministic safety suite pass locally; deployed model evaluation is still required before enablement. See [the contract record](docs/verification/phase5-evidence-agent-contract.md).
+- Phase 5 foundation: the typed, read-only Evidence-agent contract, deterministic safety suite and eight-case Evidence oracle pass locally; deployed model evaluation is still required before enablement. See [the contract record](docs/verification/phase5-evidence-agent-contract.md).
 
 Generated UI output in `static/build` and Forge working data in `.forge` are intentionally ignored. GitHub Actions rebuilds the UI from the lockfile on every push and pull request.
